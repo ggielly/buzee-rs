@@ -117,6 +117,29 @@ export const searchFiltersOpen = writable(false);
 export const ignoreDialogOpen = writable(false);
 export const dateLimitUNIX = writable(storedDateLimitUNIX || null)
 
+export interface AppStatistics {
+  status: string;
+  total_files: number;
+  parsed_files: number;
+  database_size_bytes: number;
+  last_scan_time: number;
+  next_scan_in_seconds: number;
+  auto_sync_enabled: boolean;
+}
+
+// Live statistics fetched from the backend for the status bar.
+export const appStatistics = writable<AppStatistics | null>(null);
+
+// Dark mode theme. Persisted locally so it survives restarts.
+let storedDarkMode = false;
+if (typeof window !== "undefined") {
+  storedDarkMode = localStorage.getItem('darkMode') === 'true';
+}
+export const darkMode = writable(storedDarkMode);
+if (typeof window !== "undefined") {
+  darkMode.subscribe((value) => { localStorage.darkMode = value; });
+}
+
 // 3. Anytime the store changes, update the local storage value.
 if(typeof window !== "undefined") {
   pinMode.subscribe(value => { localStorage.pinMode = value })

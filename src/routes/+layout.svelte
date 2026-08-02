@@ -12,7 +12,7 @@
   import EventListeners from "$lib/utils/eventListeners.svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
-  import { isMac, windowBlurred, cronJobSet, userPreferences, disableInteraction, pagePath, allowedExtensions } from "$lib/stores";
+  import { isMac, windowBlurred, cronJobSet, userPreferences, disableInteraction, pagePath, allowedExtensions, darkMode } from "$lib/stores";
   import { categoriseExtensions } from '$lib/utils/miscUtils';
 
   import SearchBar from "$lib/components/search/searchBar.svelte";
@@ -20,6 +20,7 @@
 	import UserDropdown from "$lib/components/header/userDropdown.svelte";
 	import SyncStatusButton from "$lib/components/settings/syncStatusButton.svelte";
   import TitleBar from "$lib/components/header/TitleBar.svelte";
+  import StatusBar from "../layout/StatusBar.svelte";
   
   var appMode: string = "menubar";
 
@@ -43,6 +44,12 @@
   $: if ($disableInteraction === false) {
     console.log("enabling");
     document.body.classList.remove("disable-interaction");
+  }
+
+  // Toggle the dark theme by adding/removing the `dark` class on <html>. Tailwind
+  // is configured with darkMode: "class" and the theme variables in app.css.
+  $: if (typeof document !== "undefined") {
+    document.documentElement.classList.toggle("dark", $darkMode);
   }
 
   async function run_tantivy() {
@@ -160,7 +167,8 @@
   </div>
 </main>
 
- 
+<StatusBar />
+
 <!-- <Dialog.Root>
   <Dialog.Trigger></Dialog.Trigger>
   <Dialog.Content>

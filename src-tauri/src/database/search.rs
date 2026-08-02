@@ -12,6 +12,33 @@ use serde_json;
 use super::schema::{body, document};
 use tantivy::{Searcher, Index};
 
+/// Sanitize a string for safe interpolation into FTS5 MATCH queries.
+/// Strips all FTS5 operator characters and escapes single quotes.
+fn sanitize_fts_input(input: &str) -> String {
+    // Strip FTS5 special characters that could alter query semantics
+    let cleaned: String = input
+        .chars()
+        .filter(|c| !matches!(c, '\'' | '"' | '(' | ')' | ':' | '{' | '}' | '^' | '+' | '-' | '*' | '~' | '\\'))
+        .collect();
+    cleaned.replace('\'', "''")
+}
+
+/// Validate that a file_type value is an alphanumeric extension (plus underscore/hyphen).
+/// Returns None if the value contains suspicious characters.
+fn validate_file_type(ft: &str) -> Option<String> {
+    let trimmed = ft.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Only allow alphanumeric, underscore, hyphen — no quotes, no parens, no semicolons
+    if trimmed.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+        Some(trimmed.to_string())
+    } else {
+        log::warn!("Rejected suspicious file_type value: {:?}", trimmed);
+        None
+    }
+}
+
 fn parse_stringified_query_segments(json_string: &str) -> QuerySegments {
     let parsed_json = serde_json::from_str(json_string);
     // convert to QuerySegments
@@ -26,67 +53,6 @@ fn parse_stringified_query_segments(json_string: &str) -> QuerySegments {
     query_segments
 }
 
-fn create_match_statement(query_segments: &QuerySegments) -> String {
-    let mut match_string: String = String::new();
-
-    // If there are quoted segments, join them with double quotes
-    if query_segments.quoted_segments.len() > 0 {
-        match_string = format!("{}",
-        // query_segments.quoted_segments.join("\" \"")
-        query_segments.quoted_segments
-            .iter()
-            .map(|segment| {
-                // if segment contains ^^, it contains a punctuation mark (using code from frontend because regex caused problems in rust)
-                if segment.contains("^^") {
-                    // Remove ^^ from the segment and
-                    // Add double quotes around the segment
-                    format!("\"{}\"", segment.replace("^^", ""))
-                } else {
-                    // Add double quotes around the segment
-                    format!("\"{}\"", segment)
-                }
-            })
-            .collect::<Vec<String>>()
-            .join(" ")
-        );
-    }
-    // If there are greedy segments, join them with an asterisk space
-    if query_segments.greedy_segments.len() > 0 {
-        match_string = format!(
-            "{} {}*",
-            match_string,
-            query_segments.greedy_segments.join("* ")
-        );
-    }
-    // If there are NOT segments, join them with `NOT` and OR
-    if query_segments.not_segments.len() > 0 {
-        match_string = format!(
-            "{} NOT ({})",
-            match_string,
-            // join with `* OR` and remove the trailing `OR`
-            query_segments.not_segments
-              .iter()
-              .map(|segment| {
-                  // if segment starts with ^^, it contains a punctuation mark
-                  // or if it has a space in it, it is a phrase
-                  if segment.starts_with("^^") || segment.contains(" ") {
-                      // Remove ^^ from the segment and
-                      // Add double quotes around the segment
-                      format!("\"{}\"", segment.replace("^^", ""))
-                  } else {
-                      // Add * to the end of the segment
-                      format!("{}*", segment)
-                  }
-              })
-              .collect::<Vec<String>>()
-              .join(" OR ")
-        );
-    }
-    // remove the trailing `OR )`
-    match_string = match_string.trim().to_string();
-    match_string
-}
-
 fn create_tantivy_query_statement(query_segments: &QuerySegments, file_type_string: String) -> String {
     let mut tantivy_query_string: String = String::new();
 
@@ -96,15 +62,12 @@ fn create_tantivy_query_statement(query_segments: &QuerySegments, file_type_stri
         query_segments.quoted_segments
             .iter()
             .map(|segment| {
-                // if segment contains ^^, it contains a punctuation mark (using code from frontend because regex caused problems in rust)
-                if segment.contains("^^") {
-                    // Remove ^^ from the segment and
-                    // Add double quotes around the segment
-                    format!("\"{}\"", segment.replace("^^", ""))
-                } else {
-                    // Add double quotes around the segment
-                    format!("\"{}\"", segment)
-                }
+                let clean = segment.replace("^^", "");
+                // Strip characters that could break Tantivy query syntax
+                let safe: String = clean.chars()
+                    .filter(|c| !matches!(c, '\'' | '(' | ')' | ':' | '{' | '}' | '^' | '+' | '~' | '\\'))
+                    .collect();
+                format!("\"{}\"", safe)
             })
             .collect::<Vec<String>>()
             .join(" ")
@@ -115,7 +78,12 @@ fn create_tantivy_query_statement(query_segments: &QuerySegments, file_type_stri
       tantivy_query_string = format!(
             "{} {}*",
             tantivy_query_string,
-            query_segments.greedy_segments.join("* ")
+            query_segments.greedy_segments.iter().map(|s| {
+                let safe: String = s.chars()
+                    .filter(|c| !matches!(c, '\'' | '"' | '(' | ')' | ':' | '{' | '}' | '^' | '+' | '-' | '~' | '\\'))
+                    .collect();
+                safe
+            }).collect::<Vec<String>>().join("* ")
         );
     }
     // If there are NOT segments, place a - in front of each segment
@@ -124,16 +92,15 @@ fn create_tantivy_query_statement(query_segments: &QuerySegments, file_type_stri
           "{} -{}",
           tantivy_query_string,
           query_segments.not_segments.iter().map(|segment| {
-            // if segment contains a space, wrap it in double quotes
-            if segment.contains(" ") {
-              format!("\"{}\"", segment)
-            } else if segment.contains("^^") {
-              // Remove ^^ from the segment and
-              // Add double quotes around the segment
-              format!("\"{}\"", segment.replace("^^", ""))
-            } else {
-              segment.to_string()
-            }
+              let clean = segment.replace("^^", "");
+              let safe: String = clean.chars()
+                  .filter(|c| !matches!(c, '\'' | '"' | '(' | ')' | ':' | '{' | '}' | '^' | '+' | '~' | '\\'))
+                  .collect();
+              if safe.contains(' ') {
+                  format!("\"{}\"", safe)
+              } else {
+                  safe
+              }
           })
           .collect::<Vec<String>>()
           .join(" -")
@@ -142,16 +109,22 @@ fn create_tantivy_query_statement(query_segments: &QuerySegments, file_type_stri
     // remove the trailing `OR )`
     tantivy_query_string = tantivy_query_string.trim().to_string();
 
-    if file_type_string.len() == 0 {
+    if file_type_string.is_empty() {
         return tantivy_query_string;
-    } 
-    if tantivy_query_string.len() != 0 {
-      // add file_type to query
-      if !file_type_string.contains(",") {
-        tantivy_query_string = format!("{} AND file_type:{}", tantivy_query_string, file_type_string);
-      } else {
-        let file_type_query_string = file_type_string.replace(",", " OR file_type:");
-        tantivy_query_string = format!("{} AND (file_type:{})", tantivy_query_string, file_type_query_string);
+    }
+    if !tantivy_query_string.is_empty() {
+      // add file_type to query — validate each type
+      let safe_types: Vec<String> = file_type_string
+          .split(',')
+          .filter_map(|t| validate_file_type(t))
+          .collect();
+      if !safe_types.is_empty() {
+        if safe_types.len() == 1 {
+          tantivy_query_string = format!("{} AND file_type:{}", tantivy_query_string, safe_types[0]);
+        } else {
+          let ft_query = safe_types.iter().map(|t| format!("file_type:{}", t)).collect::<Vec<_>>().join(" OR ");
+          tantivy_query_string = format!("{} AND ({})", tantivy_query_string, ft_query);
+        }
       }
     }
 
@@ -166,77 +139,34 @@ pub fn search_fts_index(
     limit: i32,
     file_type: Option<String>,
     date_limit: Option<DateLimit>,
-    mut conn: PooledConnection<ConnectionManager<SqliteConnection>>,
+    conn: PooledConnection<ConnectionManager<SqliteConnection>>,
     app: &tauri::AppHandle
 ) -> Result<Vec<DocumentSearchResult>, diesel::result::Error> {
-    println!(
+    log::debug!(
         "search_fts_index: query: {}, page: {}, limit: {}, file_type: {:?}, date_limit: {:?}",
         query, page, limit, file_type, date_limit
     );
 
     let query_segments: QuerySegments = parse_stringified_query_segments(&query);
-    println!("query_segments: {:?}", query_segments);
+    log::debug!("query_segments: {:?}", query_segments);
 
     let file_type_clone = file_type.clone();
-    let file_type_clone_two = file_type.clone();
-    // Add file type(s)
-    let where_file_type = if let Some(file_type) = file_type {
-      if !file_type.contains(",") {
-        format!(r#"file_type IN ('{}')"#, file_type)
-      } else {
-        format!(
-            r#"file_type IN ('{}')"#,
-            file_type.replace(",", "','").replace("' ", "'")
-        )
-      }
-    } else {
-      "".to_string()
-    };
-    // Add date limit(s)
-    let date_limit_clone = date_limit.clone();
-    let where_date_limit: String = if let Some(date_limit) = date_limit {
-      format!(
-        r#"{} last_modified >= '{}' AND last_modified <= '{}'"#,
-        if !where_file_type.is_empty() {
-          "AND"
-        } else {
-          ""
-        },
-        date_limit.start,
-        date_limit.end
-      )
-    } else {
-        "".to_string()
-    };
 
-    let mut search_results: Vec<DocumentSearchResult> = Vec::new();
+    let date_limit_clone = date_limit.clone();
+    let mut search_results: Vec<DocumentSearchResult>;
     // if there is only a NOT query, pass it to `handle_special_case` function
     if query_segments.quoted_segments.is_empty() && query_segments.greedy_segments.is_empty() && !query_segments.not_segments.is_empty() {
       search_results = handle_special_case(query, page, limit, file_type_clone, conn).unwrap();
     }
-    // otherwise run the body and metadata fts queries as usual
+    // otherwise run the Tantivy search query
     else {
-      let match_string = create_match_statement(&query_segments);
-      println!("match_string: {}", match_string);
-      let tantivy_string = create_tantivy_query_statement(&query_segments, file_type_clone_two.unwrap_or("".to_string()));
-      println!("tantivy_string: {}", tantivy_string);
+      let tantivy_string = create_tantivy_query_statement(&query_segments, file_type_clone.unwrap_or("".to_string()));
+      log::debug!("tantivy_string: {}", tantivy_string);
 
       let tantivy_index = get_tantivy_index(create_tantivy_schema()).unwrap();
       let searcher = acquire_searcher_from_reader(&app).unwrap();
       let new_conn = establish_connection(&app);
-      let tantivy_search_results = get_search_results_from_tantivy_index(&tantivy_string, limit, page, &searcher, &tantivy_index, new_conn).unwrap_or(Vec::new());
-
-      // let tantivy_search_results = Vec::new();
-      println!("got {} results from tantivy index", tantivy_search_results.len());
-
-      let metadata_fts_query = create_metadata_fts_query(&where_file_type, &where_date_limit, &match_string, limit, page);
-      let metadata_search_results: Vec<DocumentSearchResult> = diesel::sql_query(metadata_fts_query).load::<DocumentSearchResult>(&mut conn).unwrap_or(Vec::new());
-      println!("got {} results from metadata_fts", metadata_search_results.len());
-      // combine the results from body_fts and metadata_fts
-      // let metadata_search_results = Vec::new();
-      for result in metadata_search_results.iter().chain(tantivy_search_results.iter()) {
-        search_results.push(result.clone());
-      }
+      search_results = get_search_results_from_tantivy_index(&tantivy_string, limit, page, &searcher, &tantivy_index, new_conn).unwrap_or(Vec::new());
     }
     // and order them by last_modified
     // TODO: change this to frecency rank
@@ -276,112 +206,6 @@ fn get_search_results_from_tantivy_index(query: &String, limit: i32, page: i32, 
   }
 }
 
-fn _create_body_fts_query(
-    where_file_type: &String,
-    where_date_limit: &String,
-    match_string: &String,
-    limit: i32,
-    page: i32,
-) -> String {
-    // Give 100x weight to the title/name column (4th) in metadata_fts and 2x weight to the url/path column (5th)
-    let inner_query = format!(
-        r#" 
-            SELECT d.id, d.source_domain, d.created_at,
-                d.name, d.path, d.size, d.file_type,
-                d.last_modified, d.last_opened, d.last_synced, d.last_parsed,
-                d.is_pinned, d.frecency_rank, d.frecency_last_accessed, d.comment
-            FROM (
-                SELECT DISTINCT metadata_id FROM body_fts
-                {match_clause}
-            ) b
-            JOIN metadata m ON b.metadata_id = m.id
-            JOIN document d ON m.source_id = d.id
-            {inner_where} {where_file_type} {where_date_limit}
-            LIMIT {limit} OFFSET {offset}
-        "#,
-        match_clause = if !match_string.is_empty() {
-            format!(
-                "WHERE body_fts MATCH '{}' ORDER BY bm25(body_fts, 1,1,100,2)",
-                match_string
-            )
-        } else {
-            "".to_string()
-        },
-        inner_where = if !where_file_type.is_empty() || !where_date_limit.is_empty() {
-            "WHERE".to_string()
-        } else {
-            "".to_string()
-        },
-        where_file_type = if !where_file_type.is_empty() {
-            where_file_type.clone()
-        } else {
-            "".to_string()
-        },
-        where_date_limit = if !where_date_limit.is_empty() {
-            // replace `last_modified` with `document.last_modified` in where_date_limit
-            where_date_limit.clone().replace("last_modified", "d.last_modified")
-        } else {
-            "".to_string()
-        },
-        limit = limit*2,
-        offset = page * limit*2
-    );
-
-    println!("body_inner_query: {}", inner_query);
-    inner_query
-}
-
-fn create_metadata_fts_query(
-    where_file_type: &String,
-    where_date_limit: &String,
-    match_string: &String,
-    limit: i32,
-    page: i32,
-) -> String {
-    // Give 5x weight to the title column (4th) in metadata_fts
-    let inner_query = format!(
-        r#"
-          SELECT m.source_domain, m.source_id as id, m.title as name, m.url as path, m.created_at, m.frecency_rank, m.frecency_last_accessed, d.file_type, d.size, d.is_pinned, d.comment, d.last_opened, d.last_synced, d.last_modified, d.last_parsed
-          FROM metadata_fts m
-          JOIN (
-              SELECT id, file_type, size, is_pinned, comment, last_opened, last_synced, last_modified, last_parsed
-              FROM document
-              {inner_where} {where_file_type} {where_date_limit}
-          ) d ON m.source_id = d.id
-          {match_clause}
-          LIMIT {limit} OFFSET {offset}
-        "#,
-        inner_where = if !where_file_type.is_empty() || !where_date_limit.is_empty() {
-            "WHERE".to_string()
-        } else {
-            "".to_string()
-        },
-        match_clause = if !match_string.is_empty() {
-            format!(
-                "WHERE metadata_fts MATCH '{}' ORDER BY bm25(metadata_fts, 1,1,1,1,100,2)",
-                match_string
-            )
-        } else {
-            "".to_string()
-        },
-        where_file_type = if !where_file_type.is_empty() {
-            where_file_type.clone()
-        } else {
-            "".to_string()
-        },
-        where_date_limit = if !where_date_limit.is_empty() {
-            where_date_limit.clone()
-        } else {
-            "".to_string()
-        },
-        limit = limit*2,
-        offset = page * limit*2
-    );
-
-    println!("metadata_inner_query: {}", inner_query);
-    inner_query
-}
-
 // Get recently opened documents
 pub fn get_recently_opened_docs(
     page: i32,
@@ -389,14 +213,18 @@ pub fn get_recently_opened_docs(
     file_type: Option<String>,
     mut conn: PooledConnection<ConnectionManager<SqliteConnection>>,
 ) -> Result<Vec<DocumentSearchResult>, diesel::result::Error> {
-    // Add file type(s)
+    // Add file type(s) — validate each type against a whitelist pattern
     let where_file_type = if let Some(file_type) = file_type {
-        if !file_type.contains(",") {
-            format!(r#" WHERE file_type IN ('{}')"#, file_type)
+        let safe_types: Vec<String> = file_type
+            .split(',')
+            .filter_map(|t| validate_file_type(t))
+            .collect();
+        if safe_types.is_empty() {
+            "".to_string()
         } else {
             format!(
                 r#" WHERE file_type IN ('{}')"#,
-                file_type.replace(",", "','").replace("' ", "'")
+                safe_types.join("','")
             )
         }
     } else {
@@ -423,11 +251,11 @@ pub fn get_recently_opened_docs(
         limit = limit,
         offset = page * limit
     );
-    println!("inner_query: {}", inner_query);
+    log::debug!("inner_query: {}", inner_query);
     let search_results = diesel::sql_query(inner_query).load::<DocumentSearchResult>(&mut conn)?;
 
     if search_results.len() > 0 {
-        println!("search_results: {:?}", search_results[0]);
+        log::debug!("search_results: {:?}", search_results[0]);
     }
     Ok(search_results)
 }
@@ -453,6 +281,14 @@ pub fn get_counts_for_all_filetypes(
     Ok(counts)
 }
 
+// Get total number of documents in the database (all indexed files).
+pub fn get_total_document_count(
+    conn: &mut SqliteConnection,
+) -> Result<i64, diesel::result::Error> {
+    use crate::database::schema::document::dsl::*;
+    document.count().get_result(conn)
+}
+
 // Get counts for total files and num files parsed
 pub fn get_file_parsed_count(mut conn: PooledConnection<ConnectionManager<SqliteConnection>>) -> Result<i64, diesel::result::Error> {
     use crate::database::schema::document::dsl::*;
@@ -474,7 +310,7 @@ fn handle_special_case(
     conn: PooledConnection<ConnectionManager<SqliteConnection>>,
 ) -> Result<Vec<DocumentSearchResult>, diesel::result::Error> {
     let query_segments: QuerySegments = parse_stringified_query_segments(&query);
-    println!("query_segments: {:?}", query_segments);
+    log::debug!("query_segments: {:?}", query_segments);
     let outer_search_results = get_recently_opened_docs(page, limit*2, file_type, conn).unwrap();
     let mut search_results: Vec<DocumentSearchResult> = Vec::new();
     // iterate over outer_search_results and remove any item where item.name or item.path contains any of query_segments.not_segments
@@ -493,136 +329,22 @@ fn handle_special_case(
     Ok(search_results)
 }
 
-// Handle special case with NEGATIVE query only
-// We don't bother looking into body_fts here because it's not needed for eliminating results
-fn _handle_special_case_old(
-    query: String,
-    page: i32,
-    limit: i32,
-    where_date_limit: String,
-    where_file_type: String,
-    mut conn: PooledConnection<ConnectionManager<SqliteConnection>>,
-) -> Result<Vec<DocumentSearchResult>, diesel::result::Error> {
-    let query_segments: QuerySegments = parse_stringified_query_segments(&query);
-    println!("query_segments: {:?}", query_segments);
-
-    let where_date_limit_clone = where_date_limit.clone();
-    let where_file_type_clone = where_file_type.clone();
-
-    let mut match_string = format!("(\"{}\")", query_segments.not_segments.join("\" OR \""));
-    match_string = match_string.trim().to_string();
-    println!("match_string: {}", match_string);
-
-    // Run a modified query to get all documents that MATCH the query
-    // Not running OFFSET here because only the top matches are needed
-    // getting 5x limit results to catch OR cases that might be missed in first set
-    let inner_query = format!(
-        r#"
-          SELECT m.source_domain, m.source_id as id, m.title as name, m.url as path, m.created_at, m.frecency_rank, m.frecency_last_accessed, d.file_type, d.size, d.is_pinned, d.comment, d.last_opened, d.last_synced, d.last_modified, d.last_parsed
-          FROM metadata_fts m
-          JOIN (
-              SELECT id, file_type, size, is_pinned, comment, last_opened, last_synced, last_modified, last_parsed
-              FROM document
-              {inner_where} {where_file_type} {where_date_limit}
-          ) d ON m.source_id = d.id
-          {match_clause}
-          LIMIT {limit}
-        "#,
-        inner_where = if !where_file_type.is_empty() || !where_date_limit.is_empty() {
-            "WHERE".to_string()
-        } else {
-            "".to_string()
-        },
-        match_clause = if !match_string.is_empty() {
-            format!(
-                "WHERE metadata_fts MATCH '{}' ORDER BY bm25(metadata_fts, 1,1,1,1,50)",
-                match_string
-            )
-        } else {
-            "".to_string()
-        },
-        where_file_type = if !where_file_type.is_empty() {
-            where_file_type
-        } else {
-            "".to_string()
-        },
-        where_date_limit = if !where_date_limit.is_empty() {
-            where_date_limit
-        } else {
-            "".to_string()
-        },
-        limit = limit * 5
-    );
-
-    println!("inner_query: {}", inner_query);
-    let inner_search_results: Vec<DocumentSearchResult> =
-        diesel::sql_query(inner_query).load::<DocumentSearchResult>(&mut conn)?;
-
-    // Run another query to get all documents for the given date_limit and file_type
-    let outer_query = format!(
-        r#"
-          SELECT m.source_domain, m.source_id as id, m.title as name, m.url as path, m.created_at, m.frecency_rank, m.frecency_last_accessed, d.file_type, d.size, d.is_pinned, d.comment, d.last_opened, d.last_synced, d.last_modified, d.last_parsed
-          FROM metadata_fts m
-          JOIN (
-              SELECT id, file_type, size, is_pinned, comment, last_opened, last_synced, last_modified, last_parsed
-              FROM document
-              {inner_where} {where_file_type_clone} {where_date_limit_clone}
-              ORDER BY last_modified DESC
-          ) d ON m.source_id = d.id
-          LIMIT {limit} OFFSET {offset}
-        "#,
-        inner_where = if !where_date_limit_clone.is_empty() || !where_file_type_clone.is_empty() {
-            "WHERE".to_string()
-        } else {
-            "".to_string()
-        },
-        where_date_limit_clone = if !where_date_limit_clone.is_empty() {
-            where_date_limit_clone
-        } else {
-            "".to_string()
-        },
-        where_file_type_clone = if !where_file_type_clone.is_empty() {
-            where_file_type_clone
-        } else {
-            "".to_string()
-        },
-        limit = limit,
-        offset = page * limit,
-    );
-
-    println!("outer_query: {}", outer_query);
-    let outer_search_results: Vec<DocumentSearchResult> =
-        diesel::sql_query(outer_query).load::<DocumentSearchResult>(&mut conn)?;
-
-    // Get the difference between the two sets of results
-    let mut search_results: Vec<DocumentSearchResult> = Vec::new();
-    for outer_result in outer_search_results {
-        let mut found = false;
-        for inner_result in &inner_search_results {
-            if inner_result.id == outer_result.id {
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            search_results.push(outer_result);
-        }
-    }
-
-    Ok(search_results)
-}
-
 // Get search suggestions
 pub fn get_metadata_title_matches(
     query: String,
     conn: &mut SqliteConnection,
 ) -> Result<Vec<String>, diesel::result::Error> {
-    println!("getting suggestions for: {}!", query);
+    log::debug!("getting suggestions for: {}!", query);
+    // Sanitize the query to prevent FTS injection — strip all FTS5 operators
+    let safe_query = sanitize_fts_input(&query);
+    if safe_query.trim().is_empty() {
+        return Ok(Vec::new());
+    }
     let inner_query = format!(
         r#"
             SELECT snippet(metadata_fts, 4, '', '', '', 2) as title from metadata_fts WHERE metadata_fts MATCH '{}*' ORDER BY rank LIMIT 10;
         "#,
-        query
+        safe_query
     );
     let keyword_suggestions: Vec<MetadataFTSSearchResult> = diesel::sql_query(inner_query).load::<MetadataFTSSearchResult>(conn)?;
     let mut suggestions: Vec<String> = keyword_suggestions.iter().map(|suggestion| suggestion.title.clone()).collect();
@@ -685,7 +407,7 @@ pub fn search_browser_history(user_profile: String, user_query: String, limit: i
   let firefox_search_results = search_firefox(user_query.clone(), i64::from(limit), i64::from(page)).unwrap_or(vec![]);
   let arc_search_results = search_arc(user_profile, user_query, i64::from(limit), i64::from(page)).unwrap_or(vec![]);
   
-  println!("got {} results from chrome and {} results from firefox and {} results from arc", chrome_search_results.len(), firefox_search_results.len(), arc_search_results.len());
+  log::debug!("got {} results from chrome and {} results from firefox and {} results from arc", chrome_search_results.len(), firefox_search_results.len(), arc_search_results.len());
   let mut search_results: Vec<DocumentSearchResult> = chrome_search_results.into_iter().chain(firefox_search_results.into_iter()).collect();
   search_results = search_results.into_iter().chain(arc_search_results.into_iter()).collect();
 

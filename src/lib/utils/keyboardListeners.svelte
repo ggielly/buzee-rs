@@ -57,11 +57,18 @@
 		if ($page.route.id === '/search' ) {
 			if (e.code === 'KeyN') {
 				e.preventDefault();
-				(document.querySelector('#next-page-results') as HTMLElement)?.click();
+				// Scroll the results container down (infinite scroll loads more).
+				const tbody = document.querySelector('tbody') as HTMLElement | null;
+				const grid = document.querySelector('#parent-grid') as HTMLElement | null;
+				const el = tbody || grid;
+				if (el) el.scrollBy({ top: 400, behavior: 'smooth' });
 			}
 			if (e.code === 'KeyP') {
 				e.preventDefault();
-				(document.querySelector('#previous-page-results') as HTMLElement)?.click();
+				const tbody = document.querySelector('tbody') as HTMLElement | null;
+				const grid = document.querySelector('#parent-grid') as HTMLElement | null;
+				const el = tbody || grid;
+				if (el) el.scrollBy({ top: -400, behavior: 'smooth' });
 			}
 			if (e.code === 'Escape') {
 				e.preventDefault();

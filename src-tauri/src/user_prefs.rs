@@ -177,7 +177,7 @@ pub fn set_default_file_types(conn: &mut SqliteConnection) {
 }
 
 pub fn set_scan_running_status(conn: &mut SqliteConnection, status: bool, set_time: bool, app: &tauri::AppHandle) {
-  println!("Setting scan_running status to: {}", status);
+  log::info!("Setting scan_running status to: {}", status);
   let state_mutex = app.state::<Mutex<SyncRunningState>>();
   let mut state = state_mutex.lock().unwrap();
   state.sync_running = status;
@@ -208,7 +208,7 @@ pub fn return_user_prefs_state(app: &tauri::AppHandle) -> UserPreferencesState {
 }
 
 pub fn set_user_preferences_state_from_db_value(app: &tauri::AppHandle) {
-  println!("Setting user preferences to mutex state");
+  log::info!("Setting user preferences to mutex state");
   let state_mutex = app.state::<Mutex<UserPreferencesState>>();
   let mut state = state_mutex.lock().unwrap();
 
@@ -270,7 +270,7 @@ pub fn fix_global_shortcut_string(new_shortcut_string: String) -> String {
   splits.pop();
   splits.push(&new_shortcut_code);
   let new_shortcut_string = splits.join("+");
-  println!("new_shortcut_string: {:?}", new_shortcut_string);
+  log::debug!("new_shortcut_string: {:?}", new_shortcut_string);
   new_shortcut_string.to_string()
 }
 
@@ -418,7 +418,7 @@ fn set_modifiers_and_code_from_state(app: &tauri::AppHandle) -> (Vec<Modifiers>,
   let state_mutex = app.state::<Mutex<UserPreferencesState>>();
   let state = state_mutex.lock().unwrap();
   let global_shortcut_string = &state.global_shortcut;
-  println!("global_shortcut_string2: {:?}", global_shortcut_string);
+  log::debug!("global_shortcut_string2: {:?}", global_shortcut_string);
   let mut splits: Vec<&str> = global_shortcut_string.split("+").collect();
   let key = Code::from_str(splits.last().unwrap()).unwrap();
   let _ = splits.pop();

@@ -13,6 +13,7 @@ use queries::{
   METADATA_FTS_VIRTUAL_TABLE_CREATE_STATEMENT,
   BODY_TABLE_CREATE_STATEMENT,
   TRIGGER_INSERT_DOCUMENT_METADATA, TRIGGER_UPDATE_DOCUMENT_METADATA,
+  DOCUMENT_INDEXES,
   USER_PREFS_TABLE_CREATE_STATEMENT,
   USER_PREFS_TABLE_ALTER_ADD_ENABLE_LOGS,
   USER_PREFS_TABLE_ALTER_ADD_MAX_OCR_PAGES,
@@ -35,7 +36,7 @@ mod queries;
 
 fn get_db_url() -> String {
   let app_dir = get_documents_directory().unwrap();
-  println!("app_dir: {}", app_dir);
+  log::info!("app_dir: {}", app_dir);
   let database_path = format!("{}/{}/{}", app_dir, APP_DIRECTORY, DB_NAME);
   let database_path = norm(&database_path);
   let database_url: String;
@@ -52,7 +53,7 @@ fn get_db_url() -> String {
 
 pub fn get_connection_pool() -> Pool<ConnectionManager<SqliteConnection>> {
   let database_url = get_db_url();
-  println!("Creating connection pool for db at: {}", &database_url);
+  log::info!("Creating connection pool for db at: {}", &database_url);
   let manager = ConnectionManager::<SqliteConnection>::new(database_url);
   Pool::builder()
       .test_on_check_out(true)
@@ -66,15 +67,14 @@ pub fn establish_connection(app: &tauri::AppHandle) -> PooledConnection<Connecti
   let state = state_mutex.lock().unwrap();
   let pool = &state.conn_pool;
 
-  println!("Getting db connection from pool");
   let mut connection = pool.get().unwrap();
 
-  // run PRAGMA queries on each connection
+  // Per-connection PRAGMAs. journal_mode=WAL is set once at startup in
+  // housekeeping::initialize() and persists at the database level.
   diesel::sql_query("PRAGMA foreign_keys = ON;").execute(&mut connection).unwrap();
   diesel::sql_query("PRAGMA busy_timeout = 5000;").execute(&mut connection).unwrap();
-  diesel::sql_query("PRAGMA journal_mode = WAL;").execute(&mut connection).unwrap();
-  diesel::sql_query("PRAGMA cache_size = 1000000000;").execute(&mut connection).unwrap();
   diesel::sql_query("PRAGMA synchronous = NORMAL;").execute(&mut connection).unwrap();
+  diesel::sql_query("PRAGMA cache_size = -64000;").execute(&mut connection).unwrap();
   diesel::sql_query("PRAGMA auto_vacuum = FULL;").execute(&mut connection).unwrap();
 
   connection
@@ -82,15 +82,13 @@ pub fn establish_connection(app: &tauri::AppHandle) -> PooledConnection<Connecti
 
 pub fn establish_direct_connection_to_db() -> SqliteConnection {
   let database_url = get_db_url();
-  println!("Creating direct connection to db at: {}", &database_url);
+  log::info!("Creating direct connection to db at: {}", &database_url);
   let mut connection = SqliteConnection::establish(&database_url).unwrap();
 
-  // run PRAGMA queries on each connection
   diesel::sql_query("PRAGMA foreign_keys = ON;").execute(&mut connection).unwrap();
   diesel::sql_query("PRAGMA busy_timeout = 5000;").execute(&mut connection).unwrap();
-  diesel::sql_query("PRAGMA journal_mode = WAL;").execute(&mut connection).unwrap();
-  diesel::sql_query("PRAGMA cache_size = 1000000000;").execute(&mut connection).unwrap();
   diesel::sql_query("PRAGMA synchronous = NORMAL;").execute(&mut connection).unwrap();
+  diesel::sql_query("PRAGMA cache_size = -64000;").execute(&mut connection).unwrap();
   diesel::sql_query("PRAGMA auto_vacuum = FULL;").execute(&mut connection).unwrap();
 
   connection
@@ -115,13 +113,13 @@ pub fn create_tables_if_not_exists(conn: &mut SqliteConnection) -> Result<usize,
   diesel::sql_query(BODY_TABLE_CREATE_STATEMENT.to_string()).execute(conn)?;
   diesel::sql_query(METADATA_TABLE_CREATE_STATEMENT.to_string()).execute(conn)?;
   diesel::sql_query(METADATA_FTS_VIRTUAL_TABLE_CREATE_STATEMENT.to_string()).execute(conn)?;
-  // diesel::sql_query(BODY_FTS_VIRTUAL_TABLE_CREATE_STATEMENT.to_string()).execute(conn)?;
+
+  // Indexes on document table for fast lookups
+  diesel::sql_query(DOCUMENT_INDEXES.to_string()).execute(conn)?;
 
   // Triggers
   diesel::sql_query(TRIGGER_INSERT_DOCUMENT_METADATA.to_string()).execute(conn)?;
   diesel::sql_query(TRIGGER_UPDATE_DOCUMENT_METADATA.to_string()).execute(conn)?;
-  // diesel::sql_query(TRIGGER_INSERT_BODY_FTS.to_string()).execute(conn)?;
-  // diesel::sql_query(TRIGGER_UPDATE_BODY_FTS.to_string()).execute(conn)?;
   Ok(1)
 }
 

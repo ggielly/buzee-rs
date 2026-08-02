@@ -3,7 +3,7 @@ use tauri::{AppHandle, Manager};
 use crate::database::{establish_connection, establish_direct_connection_to_db};
 // use crate::database::schema::app_data;
 use crate::housekeeping::get_home_directory;
-use crate::ipc::send_message_to_frontend;
+use crate::ipc::{send_message_to_frontend, refresh_ignore_allow_cache};
 use crate::indexing::{add_path_to_allow_list, parse_content_from_files, walk_directory};
 use crate::user_prefs::set_scan_running_status;
 use log::info;
@@ -12,19 +12,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::custom_types::{SyncRunningState, UserPreferencesState};
 
 pub async fn run_sync_operation(window: tauri::WebviewWindow, app: AppHandle, switch_off: bool, file_paths: Vec<String>) {
-  println!("file paths: {:?}", file_paths);
+  log::info!("file paths: {:?}", file_paths);
   let mut file_paths = file_paths;
 
-  println!("File sync started");
+  log::info!("File sync started");
   let mut conn = establish_connection(&app);
 
   // On each click, check if sync is already running
   let sync_running = sync_status(&app);
   if sync_running.0 == "true" || switch_off {
-    println!("File sync already running; Stopping now");
+    log::info!("File sync already running; Stopping now");
     // Set sync status to false
     set_scan_running_status(&mut conn, false, true, &app);
-    println!("File sync stopped");
+    log::info!("File sync stopped");
   } else {
     info!("FILE SYNC STARTED AT {}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64);
     // Set sync status to true
@@ -48,12 +48,12 @@ pub async fn run_sync_operation(window: tauri::WebviewWindow, app: AppHandle, sw
 
       if detailed_scan_allowed {
         // Then start parsing the content of all files and add it to the body table
-        println!("Parsing content from files");
-        let files_parsed = parse_content_from_files(&mut new_conn, app.clone()).await;
-        println!("Files parsed: {}", files_parsed);
+        log::info!("Parsing content from files");
+        let files_parsed = parse_content_from_files(&mut new_conn, window.clone(), app.clone()).await;
+        log::info!("Files parsed: {}", files_parsed);
       }
       // Emit closing sync status to the frontend
-      println!("Sending message to frontend: Sync operation completed");
+      log::info!("Sending message to frontend: Sync operation completed");
       set_scan_running_status(&mut new_conn, false, true, &app);
       send_message_to_frontend(&window, "sync-status".to_string(), "sync-status".to_string(), "false".to_string());
       info!("FILE SYNC FINISHED AT {}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64);
@@ -76,8 +76,8 @@ pub fn sync_status(app: &AppHandle) -> (String, i64) {
 }
 
 pub async fn add_specific_folders(window: &tauri::WebviewWindow, file_paths: Vec<String>, is_folder: bool, app: AppHandle) {
-  println!("file paths: {:?}", file_paths);
-  println!("Adding specific folders...");
+  log::info!("file paths: {:?}", file_paths);
+  log::info!("Adding specific folders...");
   let window = window.clone();
   // Spawn the new task
   tokio::spawn(async move {
@@ -88,6 +88,7 @@ pub async fn add_specific_folders(window: &tauri::WebviewWindow, file_paths: Vec
       for path in file_paths {
         let _ = add_path_to_allow_list(path, is_folder, &mut conn);
       }
+      refresh_ignore_allow_cache(&app);
       let _files_added = walk_directory(&mut conn, &window, file_paths_clone, app);
     } else {
       // This is the onboarding run

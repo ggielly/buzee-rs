@@ -1,5 +1,6 @@
 // use crate::custom_types::Error; // Import the Error type
 use dirs::document_dir;
+use diesel::RunQueryDsl;
 use crate::database::create_tables_if_not_exists;
 use crate::database::establish_direct_connection_to_db;
 use crate::utils::norm;
@@ -34,7 +35,7 @@ pub fn create_app_directory_if_not_exists() -> Result<(), std::io::Error> {
   let documents_dir = get_documents_directory().unwrap();
   let app_dir_path = format!("{}/{}", documents_dir, APP_DIRECTORY);
   let app_dir_path = norm(&app_dir_path);
-  println!("creating app dir at:{}", &app_dir_path);
+  log::info!("creating app dir at:{}", &app_dir_path);
   std::fs::create_dir_all(app_dir_path)
 }
 
@@ -48,7 +49,7 @@ pub fn create_tantivy_index_directory_if_not_exists() -> Result<(), std::io::Err
   let app_dir_path = get_app_directory();
   let index_dir_path = format!("{}/{}", app_dir_path, "buzee_tantivy_index");
   let index_dir_path = norm(&index_dir_path);
-  println!("creating tantivy index dir at:{}", &index_dir_path);
+  log::info!("creating tantivy index dir at:{}", &index_dir_path);
   std::fs::create_dir_all(index_dir_path)
 }
 
@@ -94,13 +95,25 @@ pub fn setup_file_logging(enabled: bool) {
 
 // Initialisation function called on each app load
 pub fn initialize() -> () {
-  println!("Initializing app directory");
+  log::info!("Initializing app directory");
   create_app_directory_if_not_exists().unwrap();
   create_tantivy_index_directory_if_not_exists().unwrap();
 
   let mut conn = establish_direct_connection_to_db();
-  println!("Initializing database");
+  log::info!("Initializing database");
   create_tables_if_not_exists(&mut conn).unwrap();
+
+  // Set all PRAGMAs once on the startup connection. WAL, auto_vacuum and
+  // synchronous are database-level and persist; foreign_keys, busy_timeout
+  // and cache_size are per-connection but setting them here covers the first
+  // connection. establish_connection() re-sets the per-connection ones on
+  // every checkout (they are fast no-ops when already applied).
+  diesel::sql_query("PRAGMA foreign_keys = ON;").execute(&mut conn).unwrap();
+  diesel::sql_query("PRAGMA busy_timeout = 5000;").execute(&mut conn).unwrap();
+  diesel::sql_query("PRAGMA journal_mode = WAL;").execute(&mut conn).unwrap();
+  diesel::sql_query("PRAGMA synchronous = NORMAL;").execute(&mut conn).unwrap();
+  diesel::sql_query("PRAGMA cache_size = -64000;").execute(&mut conn).unwrap();
+  diesel::sql_query("PRAGMA auto_vacuum = FULL;").execute(&mut conn).unwrap();
 
   // Set default app data
   set_default_app_data(&mut conn);

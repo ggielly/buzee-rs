@@ -139,13 +139,6 @@ pub struct MetadataFTSSearchResult {
     pub title: String,
 }
 
-// This struct is for SELECTING from the body_fts table without any JOINs
-// #[derive(Serialize, Deserialize, Queryable, QueryableByName, PartialEq, Debug, Clone)]
-// #[diesel(table_name = body_fts)]
-// pub struct BodyFTSSearchResult {
-//     pub text: String,
-// }
-
 // This struct is for SELECTING from the document table without any JOINs
 #[derive(Serialize, Deserialize, Queryable, QueryableByName, PartialEq, Debug, Clone)]
 #[diesel(table_name = document)]

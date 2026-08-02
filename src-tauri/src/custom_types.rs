@@ -179,6 +179,20 @@ impl TantivyReaderState {
   }
 }
 
+use tantivy::IndexWriter;
+// Struct for Tantivy Writer (singleton — shared across all write operations)
+pub(crate) struct TantivyWriterState {
+  pub writer: IndexWriter
+}
+
+impl TantivyWriterState {
+  pub fn new(given_writer: IndexWriter) -> Self {
+    Self {
+      writer: given_writer
+    }
+  }
+}
+
 use diesel::r2d2::{Pool, ConnectionManager};
 use diesel::SqliteConnection;
 
@@ -206,6 +220,198 @@ impl Default for SyncRunningState {
     Self {
       sync_running: false,
       last_sync_time: 0
+    }
+  }
+}
+
+use std::collections::HashSet;
+
+/// Cached allow/ignore lists to avoid re-querying the DB on every file during scan.
+#[derive(Default)]
+pub(crate) struct IgnoreAllowCacheState {
+  pub ignored_file_paths: HashSet<String>,
+  pub ignored_folder_prefixes: Vec<String>,
+  pub ignored_indexonly_file_paths: HashSet<String>,
+  pub ignored_indexonly_folder_prefixes: Vec<String>,
+  pub allowed_file_paths: HashSet<String>,
+  pub allowed_folder_prefixes: Vec<String>,
+}
+
+impl IgnoreAllowCacheState {
+  pub fn from_db(conn: &mut diesel::SqliteConnection) -> Self {
+    use crate::indexing::{get_all_ignored_paths, get_all_allowed_paths};
+
+    let ignored_items = get_all_ignored_paths(conn);
+    let allowed_items = get_all_allowed_paths(conn);
+
+    let mut ignored_file_paths = HashSet::new();
+    let mut ignored_folder_prefixes = Vec::new();
+    let mut ignored_indexonly_file_paths = HashSet::new();
+    let mut ignored_indexonly_folder_prefixes = Vec::new();
+    let mut allowed_file_paths = HashSet::new();
+    let mut allowed_folder_prefixes = Vec::new();
+
+    for item in &ignored_items {
+      if item.is_folder {
+        if item.ignore_indexing {
+          ignored_folder_prefixes.push(item.path.clone());
+        } else {
+          ignored_indexonly_folder_prefixes.push(item.path.clone());
+        }
+      } else {
+        if item.ignore_indexing {
+          ignored_file_paths.insert(item.path.clone());
+        } else {
+          ignored_indexonly_file_paths.insert(item.path.clone());
+        }
+      }
+    }
+
+    for item in &allowed_items {
+      if item.is_folder {
+        allowed_folder_prefixes.push(item.path.clone());
+      } else {
+        allowed_file_paths.insert(item.path.clone());
+      }
+    }
+
+    // Sort folder prefixes by length descending so longer (more specific) paths match first
+    ignored_folder_prefixes.sort_by(|a, b| b.len().cmp(&a.len()));
+    ignored_indexonly_folder_prefixes.sort_by(|a, b| b.len().cmp(&a.len()));
+    allowed_folder_prefixes.sort_by(|a, b| b.len().cmp(&a.len()));
+
+    Self {
+      ignored_file_paths,
+      ignored_folder_prefixes,
+      ignored_indexonly_file_paths,
+      ignored_indexonly_folder_prefixes,
+      allowed_file_paths,
+      allowed_folder_prefixes,
+    }
+  }
+
+  /// Returns true if the path should be skipped (ignored, not overridden by allow list).
+  pub fn should_skip(&self, path: &str) -> bool {
+    // If explicitly allowed, never skip
+    if self.allowed_file_paths.contains(path) {
+      return false;
+    }
+    if self.allowed_folder_prefixes.iter().any(|prefix| path.starts_with(prefix)) {
+      return false;
+    }
+    // If in ignore list with ignore_indexing=true, skip
+    if self.ignored_file_paths.contains(path) {
+      return true;
+    }
+    if self.ignored_folder_prefixes.iter().any(|prefix| path.starts_with(prefix)) {
+      return true;
+    }
+    false
+  }
+
+  /// Returns true if the path should be removed from index only (ignored but not fully).
+  pub fn should_remove_index_only(&self, path: &str) -> bool {
+    if self.allowed_file_paths.contains(path) {
+      return false;
+    }
+    if self.allowed_folder_prefixes.iter().any(|prefix| path.starts_with(prefix)) {
+      return false;
+    }
+    if self.ignored_indexonly_file_paths.contains(path) {
+      return true;
+    }
+    if self.ignored_indexonly_folder_prefixes.iter().any(|prefix| path.starts_with(prefix)) {
+      return true;
+    }
+    false
+  }
+}
+
+// Statistics shown in the status bar.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct AppStatistics {
+  pub status: String,
+  pub total_files: i64,
+  pub parsed_files: i64,
+  pub database_size_bytes: u64,
+  pub last_scan_time: i64,
+  pub next_scan_in_seconds: i64,
+  pub auto_sync_enabled: bool,
+}
+
+impl Default for AppStatistics {
+  fn default() -> Self {
+    Self {
+      status: "idle".to_string(),
+      total_files: 0,
+      parsed_files: 0,
+      database_size_bytes: 0,
+      last_scan_time: 0,
+      next_scan_in_seconds: -1,
+      auto_sync_enabled: false,
+    }
+  }
+}
+
+// A single entry in the file-type / category breakdown for the dashboard.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct DashboardBuckets {
+  pub file_type: String,
+  pub count: i64,
+  pub size_bytes: f64,
+}
+
+// Comprehensive statistics shown on the Dashboard home page.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct DashboardStats {
+  // Totals
+  pub total_files: i64,
+  pub total_folders: i64,
+  pub total_size_bytes: f64,
+  pub average_size_bytes: f64,
+  pub largest_file_size_bytes: f64,
+  // Parsing
+  pub parsed_files: i64,
+  pub parsed_total_size_bytes: f64,
+  pub unparsed_files: i64,
+  // Pinned
+  pub pinned_files: i64,
+  // Frecency
+  pub most_frequent_count: i64,
+  // Database + scans
+  pub database_size_bytes: u64,
+  pub last_scan_time: i64,
+  pub next_scan_in_seconds: i64,
+  pub auto_sync_enabled: bool,
+  pub scan_running: bool,
+  // Breakdowns
+  pub filetype_counts: Vec<DashboardBuckets>,
+  // Recent / largest documents (limited)
+  pub top_largest: Vec<crate::database::models::DocumentSearchResult>,
+  pub top_recent: Vec<crate::database::models::DocumentSearchResult>,
+}
+
+impl Default for DashboardStats {
+  fn default() -> Self {
+    Self {
+      total_files: 0,
+      total_folders: 0,
+      total_size_bytes: 0.0,
+      average_size_bytes: 0.0,
+      largest_file_size_bytes: 0.0,
+      parsed_files: 0,
+      parsed_total_size_bytes: 0.0,
+      unparsed_files: 0,
+      pinned_files: 0,
+      most_frequent_count: 0,
+      database_size_bytes: 0,
+      last_scan_time: 0,
+      next_scan_in_seconds: -1,
+      auto_sync_enabled: false,
+      scan_running: false,
+      filetype_counts: Vec::new(),
+      top_largest: Vec::new(),
+      top_recent: Vec::new(),
     }
   }
 }

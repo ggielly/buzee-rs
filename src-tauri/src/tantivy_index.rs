@@ -6,15 +6,25 @@
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
 use tantivy::{schema::*, DocAddress};
-use tantivy::{doc, Index, IndexWriter, ReloadPolicy, Searcher, TantivyError};
+use tantivy::{doc, Index, ReloadPolicy, Searcher, TantivyError};
 use crate::housekeeping::get_app_directory;
 use crate::utils::norm;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use crate::custom_types::{Error, TantivyDocumentItem, TantivyDocumentSearchResult, TantivyBookmarkSearchResult};
+use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::Manager;
 use crate::custom_types::TantivyReaderState;
+
+// Singleton schema — created once, reused everywhere
+use std::sync::OnceLock;
+fn cached_schema() -> &'static Schema {
+  static INSTANCE: OnceLock<Schema> = OnceLock::new();
+  INSTANCE.get_or_init(|| create_tantivy_schema())
+}
+
+// Reuse a single IndexWriter across all operations to avoid repeated open cost.
+use crate::custom_types::TantivyWriterState;
 
 pub fn create_tantivy_schema() -> Schema {
   let mut schema_builder = Schema::builder();
@@ -60,6 +70,11 @@ pub fn get_tantivy_index(schema: Schema) -> tantivy::Result<Index> {
   }
 }
 
+/// Get or open the Tantivy index using the cached schema.
+pub fn get_tantivy_index_cached() -> tantivy::Result<Index> {
+  get_tantivy_index(cached_schema().clone())
+}
+
 pub fn get_reader_for_index(index: &Index) -> tantivy::Result<tantivy::IndexReader> {
   let reader = index
       .reader_builder()
@@ -86,12 +101,53 @@ pub fn acquire_searcher_from_reader(app: &tauri::AppHandle) -> Result<Searcher, 
   Ok(searcher)
 }
 
-pub fn add_docs_to_index(files_array: &Vec<TantivyDocumentItem>,) -> tantivy::Result<()> {
-  let index = get_tantivy_index(create_tantivy_schema()).unwrap();
-  let mut index_writer: IndexWriter = index.writer(150_000_000)?;
+/// Acquire a mutable reference to the shared IndexWriter from Tauri state.
+/// Panics if the state has not been initialized (should happen in `ipc::initialize`).
+///
+/// NOTE: We can't return a MutexGuard from a helper because `app.state()` returns
+/// a temporary `State<'_, M>` whose borrow doesn't outlive the function scope.
+/// Instead, callers lock the mutex inline.
 
-  // Get the fields
+pub fn delete_docs_from_index_with_ids(app: &tauri::AppHandle, ids_to_delete: &Vec<i32>) -> tantivy::Result<()> {
+  let index = get_tantivy_index_cached().unwrap();
+  let state_mutex = app.state::<Mutex<TantivyWriterState>>();
+  let mut state = state_mutex.lock().unwrap();
+  let writer = &mut state.writer;
+
   let id = index.schema().get_field("id").unwrap();
+  for del_id in ids_to_delete {
+    writer.delete_term(Term::from_field_i64(id, i64::from(*del_id)));
+  }
+
+  let commit_stamp = writer.commit()?;
+
+  if commit_stamp > 0 {
+    return Ok(());
+  } else {
+    return Err(tantivy::TantivyError::SystemError("Failed to commit changes to the index".to_string()));
+  }
+}
+
+/// Delete documents by source_id and add new documents in a single writer session,
+/// committing only once. This halves the fsync cost per batch compared to calling
+/// `delete_docs_from_index_with_ids` + `add_docs_to_index` separately.
+pub fn delete_and_add_docs_to_index(
+  app: &tauri::AppHandle,
+  ids_to_delete: &Vec<i32>,
+  docs_to_add: &Vec<TantivyDocumentItem>,
+) -> tantivy::Result<()> {
+  let index = get_tantivy_index_cached().unwrap();
+  let state_mutex = app.state::<Mutex<TantivyWriterState>>();
+  let mut state = state_mutex.lock().unwrap();
+  let writer = &mut state.writer;
+
+  // 1. Delete old documents by source_id
+  let id = index.schema().get_field("id").unwrap();
+  for del_id in ids_to_delete {
+    writer.delete_term(Term::from_field_i64(id, i64::from(*del_id)));
+  }
+
+  // 2. Add new documents
   let source_table = index.schema().get_field("source_table").unwrap();
   let source_domain = index.schema().get_field("source_domain").unwrap();
   let title = index.schema().get_field("title").unwrap();
@@ -101,9 +157,8 @@ pub fn add_docs_to_index(files_array: &Vec<TantivyDocumentItem>,) -> tantivy::Re
   let last_modified = index.schema().get_field("last_modified").unwrap();
   let comment = index.schema().get_field("comment").unwrap();
 
-  // for each document in the array, add it to the index
-  for doc in files_array {
-    index_writer.add_document(doc!(
+  for doc in docs_to_add {
+    writer.add_document(doc!(
       id => doc.source_id,
       source_table => doc.source_table.as_str(),
       source_domain => doc.source_domain.as_str(),
@@ -116,41 +171,24 @@ pub fn add_docs_to_index(files_array: &Vec<TantivyDocumentItem>,) -> tantivy::Re
     ))?;
   }
 
-  let commit_stamp = index_writer.commit()?;
-
+  // 3. Single commit for the entire batch
+  let commit_stamp = writer.commit()?;
   if commit_stamp > 0 {
-    return Ok(());
+    Ok(())
   } else {
-    return Err(tantivy::TantivyError::SystemError("Failed to commit changes to the index".to_string()));
+    Err(tantivy::TantivyError::SystemError("Failed to commit changes to the index".to_string()))
   }
 }
 
-pub fn delete_docs_from_index_with_ids(ids_to_delete: &Vec<i32>) -> tantivy::Result<()> {
-  let index = get_tantivy_index(create_tantivy_schema()).unwrap();
-  let mut index_writer: IndexWriter = index.writer(150_000_000)?;
+pub fn delete_all_docs_from_index(app: &tauri::AppHandle) -> tantivy::Result<()> {
+  log::warn!("WARNING: Deleting all documents from the index");
+  let state_mutex = app.state::<Mutex<TantivyWriterState>>();
+  let mut state = state_mutex.lock().unwrap();
+  let writer = &mut state.writer;
 
-  // for each ID in the array, find the document and delete it
-  for id in ids_to_delete {
-    index_writer.delete_term(Term::from_field_i64(index.schema().get_field("id").unwrap(), i64::from(*id)));
-  }
+  let _ = writer.delete_all_documents().unwrap();
 
-  let commit_stamp = index_writer.commit()?;
-
-  if commit_stamp > 0 {
-    return Ok(());
-  } else {
-    return Err(tantivy::TantivyError::SystemError("Failed to commit changes to the index".to_string()));
-  }
-}
-
-pub fn delete_all_docs_from_index() -> tantivy::Result<()> {
-  println!("WARNING: Deleting all documents from the index");
-  let index = get_tantivy_index(create_tantivy_schema()).unwrap();
-  let mut index_writer: IndexWriter = index.writer(150_000_000)?;
-
-  let _ = index_writer.delete_all_documents().unwrap();
-
-  let commit_stamp = index_writer.commit()?;
+  let commit_stamp = writer.commit()?;
 
   if commit_stamp > 0 {
     return Ok(());
@@ -306,8 +344,8 @@ pub fn _get_body_values_from_id(searcher: &Searcher, given_id: i64) -> Vec<Strin
 }
 
 pub fn internal_test_create_csv_dump_from_index(searcher: &Searcher) {
-  println!("Creating a CSV dump from the index");
-  let index = get_tantivy_index(create_tantivy_schema()).unwrap();
+  log::info!("Creating a CSV dump from the index");
+  let index = get_tantivy_index_cached().unwrap();
 
   let id = index.schema().get_field("id").unwrap();
   let url = index.schema().get_field("url").unwrap();
@@ -318,7 +356,7 @@ pub fn internal_test_create_csv_dump_from_index(searcher: &Searcher) {
   let query = QueryParser::for_index(&index, vec![url, last_parsed, chunk_id]).parse_query("*").unwrap();
   let top_docs = searcher.search(&query, &TopDocs::with_limit(100_000)).unwrap();
 
-  println!("Found {} items in the index", top_docs.len());
+  log::info!("Found {} items in the index", top_docs.len());
 
   // create a CSV file with the results
   let mut wtr = csv::Writer::from_path("/Users/thatgurjot/Documents/buzee-tauri/search_results.csv").unwrap();
@@ -333,5 +371,5 @@ pub fn internal_test_create_csv_dump_from_index(searcher: &Searcher) {
   }
   wtr.flush().unwrap();
 
-  println!("CSV dump created successfully");
+  log::info!("CSV dump created successfully");
 }

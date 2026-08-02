@@ -5,7 +5,7 @@
 	import { goto } from '$app/navigation';
 	import { trackEvent } from '@aptabase/web';
 	import { invoke } from '@tauri-apps/api/core';
-	import { isMac, statusMessage, userPreferences, dbCreationInProgress, syncStatus } from '$lib/stores';
+	import { isMac, statusMessage, userPreferences, dbCreationInProgress, syncStatus, darkMode } from '$lib/stores';
 	import { ask, open, message } from '@tauri-apps/plugin-dialog';
 	import * as Dialog from "$lib/components/ui/dialog";
   import Button from "$lib/components/ui/button/button.svelte";
@@ -383,6 +383,19 @@
 
 		<tr class="h-10">
 			<td colspan="3"><Separator /></td>
+		</tr>
+
+		<!-- Dark Mode -->
+		<tr>
+			<td class="text-center px-2">
+				<Switch class="hover:data-[state=checked]:bg-violet-500" bind:checked={$darkMode} />
+			</td>
+			<td class="py-2 skip-hover">
+				Dark Mode
+				<div class="flex items-center small-explanation gap-1">
+					<div>Use a dark theme for the app</div>
+				</div>
+			</td>
 		</tr>
 
 		<!-- On/Off Toggles -->
