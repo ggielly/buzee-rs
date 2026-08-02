@@ -9,7 +9,7 @@ use crate::text_extraction::txt;
 #[cfg(all(target_os = "macos", feature = "ocr"))]
 use tauri_plugin_shell::{ShellExt, process::CommandEvent};
 
-use crate::text_extraction::win_ocr::{has_usable_text, OCR_FALLBACK_MIN_CHARS};
+use crate::text_extraction::win_ocr::{should_fallback_to_ocr, OCR_FALLBACK_MIN_CHARS};
 
 #[cfg(all(target_os = "windows", feature = "ocr"))]
 const IMAGE_OCR_TIMEOUT_SECS: u64 = 60;
@@ -26,7 +26,7 @@ pub async fn extract(file: &String, _app: &tauri::AppHandle) -> Result<String, B
   }
 
   // If the SVG already yields usable text, skip OCR entirely.
-  if has_usable_text(&text_based_content, OCR_FALLBACK_MIN_CHARS) {
+  if !should_fallback_to_ocr(&text_based_content, OCR_FALLBACK_MIN_CHARS) {
     return Ok(text_based_content)
   }
 

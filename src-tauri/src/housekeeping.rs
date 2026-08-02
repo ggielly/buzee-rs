@@ -113,4 +113,12 @@ pub fn initialize() -> () {
   let enable_logs = get_enable_logs_flag(&mut conn);
   setup_file_logging(enable_logs);
   info!("Logger initialized");
+
+  // Prune stale OCR cache rows (per-page entries for deleted files, whole-file
+  // entries older than 90 days) on startup so the cache stays bounded.
+  #[cfg(all(target_os = "windows", feature = "ocr"))]
+  {
+    use crate::text_extraction::ocr_cache;
+    ocr_cache::prune_ocr_caches(&mut conn, 90);
+  }
 }

@@ -1,7 +1,7 @@
 use std::{error::Error, path::Path};
 use pdf_extract::extract_text;
 
-use crate::text_extraction::win_ocr::{OCR_FALLBACK_MIN_CHARS, has_usable_text};
+use crate::text_extraction::win_ocr::{OCR_FALLBACK_MIN_CHARS, should_fallback_to_ocr};
 
 // OCR fallback (native WinRT on Windows, textra sidecar on macOS) is opt-in via
 // the `ocr` feature. The default build only performs text-layer extraction with
@@ -30,7 +30,7 @@ pub async fn extract(file: &String, _app: &tauri::AppHandle) -> Result<String, B
   };
 
   // If the native text layer already yields usable text, skip OCR entirely.
-  if has_usable_text(&text_based_content, OCR_FALLBACK_MIN_CHARS) {
+  if !should_fallback_to_ocr(&text_based_content, OCR_FALLBACK_MIN_CHARS) {
     return Ok(text_based_content)
   }
 
@@ -82,12 +82,17 @@ pub async fn extract(file: &String, _app: &tauri::AppHandle) -> Result<String, B
 
       let mut conn = establish_connection(_app);
 
+      // Read the OCR cap once; it is used both for the run and to validate the
+      // whole-file cache below.
+      let max_pages = get_pdf_max_ocr_pages(_app) as u32;
+
       // Check the whole-file OCR cache before running expensive recognition.
       // This fast path returns when the file is byte-for-byte unchanged since
-      // the last successful run.
+      // the last successful run AND that run applied at least `max_pages` as
+      // its cap (so raising pdf_max_ocr_pages invalidates a truncated entry).
       let file_hash = ocr_cache::compute_file_hash(std::path::Path::new(file))
         .unwrap_or_default();
-      if let Some(cached) = ocr_cache::get_cached_ocr(&file_hash, &mut conn) {
+      if let Some(cached) = ocr_cache::get_cached_ocr_pdf(&file_hash, &mut conn, max_pages) {
         return Ok(cached);
       }
 
@@ -95,9 +100,13 @@ pub async fn extract(file: &String, _app: &tauri::AppHandle) -> Result<String, B
       // matches a stored page hash will not be re-OCR-ed.
       let cached_pages = ocr_cache::get_cached_pdf_pages(file, &mut conn);
 
+      // Note: Tokio cannot cancel a spawn_blocking task, so if the timeout
+      // fires the recognition keeps running in the background until it finishes
+      // (its result is simply discarded). This is bounded in practice by the
+      // sequential indexing loop, and the per-page cache lets the next scan
+      // resume from where this run left off.
       let path_buf = std::path::PathBuf::from(file);
-      let max_pages = get_pdf_max_ocr_pages(_app) as u32;
-      let pages = tokio::time::timeout(
+      let (pages, pages_attempted) = tokio::time::timeout(
         std::time::Duration::from_secs(PDF_OCR_TIMEOUT_SECS),
         tokio::task::spawn_blocking(move || {
           let ocr_engine = win_ocr::WindowsOcr;
@@ -122,17 +131,21 @@ pub async fn extract(file: &String, _app: &tauri::AppHandle) -> Result<String, B
         return Err("OcrUnavailableForPdf".into());
       }
 
-      // Persist the fresh per-page results (reused pages carry their stored hash
-      // and text, so unchanged pages stay cached) and update the whole-file
-      // cache.
-      ocr_cache::store_cached_pdf_pages(file, &pages, &mut conn);
-      ocr_cache::store_ocr_result(
-        &file_hash,
-        &text,
-        pages.len() as i32,
-        None,
-        &mut conn,
-      );
+      // Persist the per-page results (merge: pages that failed stay cached) and
+      // the whole-file cache only when the run was complete, so a partial run
+      // never poisons the fast path with truncated text. The whole-file cache
+      // stores the applied OCR cap so a later raise of pdf_max_ocr_pages is
+      // detected on read.
+      ocr_cache::store_cached_pdf_pages(file, &pages, pages_attempted, &mut conn);
+      if pages.len() as u32 == pages_attempted {
+        ocr_cache::store_ocr_result(
+          &file_hash,
+          &text,
+          max_pages as i32,
+          None,
+          &mut conn,
+        );
+      }
 
       return Ok(text)
     }

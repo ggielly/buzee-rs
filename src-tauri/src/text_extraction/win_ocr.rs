@@ -78,14 +78,16 @@ pub trait ImageOcr {
 
   /// OCRs `max_pages` of a PDF, reusing `cached_pages` where the rasterized page
   /// hash matches the stored one. Returns the fresh per-page results (cached
-  /// text reused as-is) so the caller can update its page cache.
+  /// text reused as-is) so the caller can update its page cache, together with
+  /// the number of pages that were attempted (`min(total_pages, max_pages)`);
+  /// the caller can compare both lengths to know whether the run was complete.
   fn recognize_pdf(
     &self,
     path: &Path,
     preferred_language: Option<&str>,
     max_pages: u32,
     cached_pages: &[CachedPdfPage],
-  ) -> Result<Vec<PdfPageOcr>, OcrError>;
+  ) -> Result<(Vec<PdfPageOcr>, u32), OcrError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -170,7 +172,7 @@ impl ImageOcr for WindowsOcr {
     preferred_language: Option<&str>,
     max_pages: u32,
     cached_pages: &[CachedPdfPage],
-  ) -> Result<Vec<PdfPageOcr>, OcrError> {
+  ) -> Result<(Vec<PdfPageOcr>, u32), OcrError> {
     windows_ocr::recognize_pdf(path, preferred_language, max_pages, cached_pages)
   }
 }
@@ -196,7 +198,7 @@ impl ImageOcr for WindowsOcr {
     _preferred_language: Option<&str>,
     _max_pages: u32,
     _cached_pages: &[CachedPdfPage],
-  ) -> Result<Vec<PdfPageOcr>, OcrError> {
+  ) -> Result<(Vec<PdfPageOcr>, u32), OcrError> {
     Err(OcrError::EngineUnavailable)
   }
 }
@@ -319,8 +321,9 @@ mod windows_ocr {
     })
   }
 
-  // Computes the SHA-256 of a rendered page's bytes (reads the stream, then
-  // restores its position). This is the per-page change fingerprint.
+  // Computes the SHA-256 of a rendered page's bytes by reading the stream in
+  // chunks (so the whole PNG is never copied into memory), then restores the
+  // stream position. This is the per-page change fingerprint.
   fn raster_hash(stream: &IRandomAccessStream) -> Result<(String, u64), OcrError> {
     use sha2::{Digest, Sha256};
 
@@ -328,27 +331,40 @@ mod windows_ocr {
     stream.Seek(0).map_err(win_err)?;
     let input = stream.GetInputStreamAt(0).map_err(win_err)?;
     let reader = DataReader::CreateDataReader(&input).map_err(win_err)?;
-    let loaded = reader
-      .LoadAsync(size as u32)
-      .map_err(win_err)?
-      .get()
-      .map_err(win_err)? as usize;
-
-    let mut buffer = vec![0u8; loaded];
-    reader.ReadBytes(&mut buffer).map_err(win_err)?;
-    stream.Seek(0).map_err(win_err)?; // restore for the decoder
 
     let mut hasher = Sha256::new();
-    hasher.update(&buffer);
+    const CHUNK_BYTES: u32 = 64 * 1024;
+    let mut remaining = size;
+    while remaining > 0 {
+      let to_load = remaining.min(CHUNK_BYTES as u64) as u32;
+      let loaded = reader
+        .LoadAsync(to_load)
+        .map_err(win_err)?
+        .get()
+        .map_err(win_err)? as usize;
+      let mut chunk = vec![0u8; loaded];
+      reader.ReadBytes(&mut chunk).map_err(win_err)?;
+      hasher.update(&chunk);
+      remaining -= loaded as u64;
+    }
+
+    stream.Seek(0).map_err(win_err)?; // restore for the decoder
     Ok((format!("{:x}", hasher.finalize()), size))
   }
+
+  // Maximum number of PDF pages to OCR concurrently, and the
+  // sequential-vs-parallel threshold: PDFs with at most this many pages are
+  // processed sequentially to avoid the spawn + per-batch document-reload
+  // overhead. Each parallel batch loads the PDF and creates its own OcrEngine,
+  // so this also bounds peak memory.
+  const MAX_PARALLEL_OCR_PAGES: usize = 8;
 
   pub fn recognize_pdf(
     path: &Path,
     preferred_language: Option<&str>,
     max_pages: u32,
     cached_pages: &[CachedPdfPage],
-  ) -> Result<Vec<PdfPageOcr>, OcrError> {
+  ) -> Result<(Vec<PdfPageOcr>, u32), OcrError> {
     let _guard = MtaGuard::init()?;
     let stream = open_readable_stream(path)?;
 
@@ -374,9 +390,9 @@ mod windows_ocr {
       cached_by_index.insert(page.index, page);
     }
 
-    // Small PDFs: sequential (avoids spawn overhead).
+    // Small PDFs: sequential (avoids spawn + per-batch document reload).
     let engine = select_engine(preferred_language)?;
-    if pages_to_ocr <= 3 {
+    if pages_to_ocr <= MAX_PARALLEL_OCR_PAGES as u32 {
       let mut results = Vec::with_capacity(pages_to_ocr as usize);
       let mut first_error: Option<OcrError> = None;
 
@@ -396,7 +412,7 @@ mod windows_ocr {
         return Err(first_error.unwrap_or(OcrError::DecodeFailed));
       }
 
-      return Ok(results);
+      return Ok((results, pages_to_ocr));
     }
 
     // Large PDFs: parallel OCR across pages, in batches.
@@ -406,11 +422,8 @@ mod windows_ocr {
     // futures::join_all waits for all results. Page order is preserved because
     // results are collected in the order the batches were spawned.
     recognize_pdf_parallel(path, preferred_language, pages_to_ocr, &cached_by_index)
+      .map(|pages| (pages, pages_to_ocr))
   }
-
-  // Maximum number of PDF pages to OCR concurrently. Each parallel task loads
-  // the PDF and creates its own OcrEngine, so this bounds peak memory.
-  const MAX_PARALLEL_OCR_PAGES: usize = 8;
 
   // OCRs `pages_to_ocr` PDF pages in small batches, each batch run on its own
   // blocking-pool thread through `join_all`.
