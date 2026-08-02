@@ -73,8 +73,10 @@ export const userPreferences = writable({
   "onboarding_done": false,
   "show_in_dock": true,
   "roadmap_survey_answered": false,
-  "parse_pdfs": false,
+  "parse_pdfs": true,
   "manual_setup": false,
+  "enable_logs": false,
+  "pdf_max_ocr_pages": 150,
 })
 export const pagePath = writable("")
 export const isMac = writable(false)
@@ -106,7 +108,6 @@ export const searchInProgress = writable(false);
 export const base64SearchInProgress = writable(false);
 export const dbCreationInProgress = writable(false);
 export const windowBlurred = writable(false);
-export const scratchPadText = writable("")
 export const base64Images = writable(storedBase64Images || [])
 export const preferLastOpened = writable(false);
 export const showResultTextPreview = writable(false);
@@ -126,7 +127,6 @@ if(typeof window !== "undefined") {
   resultsPerPage.subscribe(value => { localStorage.resultsPerPage = value })
   statusMessage.subscribe(value => { localStorage.statusMessage = value })
   compactViewMode.subscribe(value => { localStorage.compactViewMode = value })
-  scratchPadText.subscribe(value => { localStorage.scratchPadText = value })
   // searchTrigger.subscribe(value => { localStorage.searchTrigger = value })
   // searchResults.subscribe(value => { localStorage.searchResults = value })
   // searchHistory.subscribe(value => { localStorage.searchHistory = value })

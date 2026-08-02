@@ -255,14 +255,26 @@ pub const USER_PREFS_TABLE_CREATE_STATEMENT : &str = r#"
     automatic_background_sync BOOLEAN NOT NULL DEFAULT 1,
     detailed_scan BOOLEAN NOT NULL DEFAULT 1,
     roadmap_survey_answered BOOLEAN NOT NULL DEFAULT 0,
-    parse_pdfs BOOLEAN NOT NULL DEFAULT 0,
-    manual_setup BOOLEAN NOT NULL DEFAULT 0
+    parse_pdfs BOOLEAN NOT NULL DEFAULT 1,
+    manual_setup BOOLEAN NOT NULL DEFAULT 0,
+    enable_logs BOOLEAN NOT NULL DEFAULT 0,
+    pdf_max_ocr_pages BIGINT NOT NULL DEFAULT 150
   );
 "#;
 
 pub const _USER_PREFS_TABLE_ALTER_STATEMENT_V_0_2_0 : &str = r#"
   ALTER TABLE user_preferences
   ADD COLUMN roadmap_survey_answered BOOLEAN NOT NULL DEFAULT 0;
+"#;
+
+pub const USER_PREFS_TABLE_ALTER_ADD_ENABLE_LOGS : &str = r#"
+  ALTER TABLE user_preferences
+  ADD COLUMN enable_logs BOOLEAN NOT NULL DEFAULT 0;
+"#;
+
+pub const USER_PREFS_TABLE_ALTER_ADD_MAX_OCR_PAGES : &str = r#"
+  ALTER TABLE user_preferences
+  ADD COLUMN pdf_max_ocr_pages BIGINT NOT NULL DEFAULT 150;
 "#;
 
 // APP_DATA stores basic app data and file type data
@@ -310,6 +322,18 @@ pub const FILE_TYPES_TABLE_CREATE_STATEMENT : &str = r#"
     file_type TEXT NOT NULL DEFAULT "",
     file_type_category TEXT NOT NULL DEFAULT "",
     file_type_allowed BOOLEAN NOT NULL DEFAULT 1
+  );
+"#;
+
+// OCR_CACHE stores pre-computed OCR results keyed by a fast content hash.
+pub const OCR_CACHE_TABLE_CREATE_STATEMENT : &str = r#"
+  CREATE TABLE IF NOT EXISTS "ocr_cache"
+  (
+    file_hash TEXT PRIMARY KEY NOT NULL,
+    text TEXT NOT NULL,
+    page_count INTEGER NOT NULL DEFAULT 0,
+    language_tag TEXT,
+    created_at BIGINT NOT NULL DEFAULT 0
   );
 "#;
 

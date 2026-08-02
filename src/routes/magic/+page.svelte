@@ -50,19 +50,6 @@
 			</tr>
 			<tr>
 				<td class="text-center px-2">
-					<button class="btn" on:click={() => gotoMagicPage('deep-breathing')}>
-            <i class="bi bi-yin-yang" />
-					</button>
-				</td>
-				<td class="py-2" role="button" on:click={() => gotoMagicPage('deep-breathing')}>
-					Deep Breathing
-					<div class="flex items-center small-explanation gap-1">
-						<div>Take a few moments to yourself</div>
-					</div>
-				</td>
-			</tr>
-			<tr>
-				<td class="text-center px-2">
 					<button class="btn" on:click={() => gotoMagicPage('stats')}>
             <i class="bi bi-pie-chart" />
 					</button>
@@ -84,19 +71,6 @@
 					Extract Text from PDF or Image
 					<div class="flex items-center small-explanation gap-1">
 						<div>Extract text from any kind of PDF or image file</div>
-					</div>
-				</td>
-			</tr>
-			<tr>
-				<td class="text-center px-2">
-					<button class="btn" on:click={() => gotoMagicPage('scratchpad')}>
-            <i class="bi bi-journal-text" />
-					</button>
-				</td>
-				<td class="py-2" role="button" on:click={() => gotoMagicPage('scratchpad')}>
-					Scratch Pad
-					<div class="flex items-center small-explanation gap-1">
-						<div>A place to keep copied text, notes, and thoughts</div>
 					</div>
 				</td>
 			</tr>

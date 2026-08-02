@@ -10,19 +10,16 @@
   import * as Resizable from "$lib/components/ui/resizable/index.js";
 
   import EventListeners from "$lib/utils/eventListeners.svelte";
-  import { trackEvent } from "@aptabase/web";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { isMac, windowBlurred, cronJobSet, userPreferences, disableInteraction, pagePath, allowedExtensions } from "$lib/stores";
   import { categoriseExtensions } from '$lib/utils/miscUtils';
 
-  import { check } from "@tauri-apps/plugin-updater";
-  import { ask } from "@tauri-apps/plugin-dialog";
-
-	import SearchBar from "$lib/components/search/searchBar.svelte";
+  import SearchBar from "$lib/components/search/searchBar.svelte";
 	import SidebarMenu from "$lib/components/sidebar/sidebarMenu.svelte";
 	import UserDropdown from "$lib/components/header/userDropdown.svelte";
 	import SyncStatusButton from "$lib/components/settings/syncStatusButton.svelte";
+  import TitleBar from "$lib/components/header/TitleBar.svelte";
   
   var appMode: string = "menubar";
 
@@ -35,29 +32,6 @@
     await listen<Payload>("event-name", (event: any) => {
         console.log("Event triggered from rust!\nPayload: " + event.payload.message);
     });
-  }
-
-  async function checkForAppUpdates() {
-    // const update = { version: "v1.0.0", body: "buzee"};
-    const update = await check();
-
-    if (update?.available) {
-        const yes = await ask(
-            `Update to v${update.version} is available!\n\nRelease notes: ${update.body}`,
-            {
-                title: "Update Available",
-                kind: "info",
-                okLabel: "Update",
-                cancelLabel: "Cancel"
-            }
-        );
-
-        if (yes) {
-            trackEvent("click:update_button_click");
-            await update.downloadAndInstall();
-            await invoke("polite_restart");
-        }
-    }
   }
 
   $: if ($disableInteraction === true) {
@@ -142,19 +116,18 @@
         });
     }
 
-    // check for app updates
-    checkForAppUpdates();
 });
 </script>
 
 <KeyboardListeners />
 <EventListeners />
+<TitleBar />
 
 <!-- <Button on:click={() => test_search_browser()}>Search</Button> -->
 <!-- <Button on:click={() => run_tantivy_index()}>Create</Button> -->
-<main class={`min-h-screen max-h-screen overflow-auto ${$windowBlurred ? "grayscale-no" : ""}`}>
-	<div class={`grid min-h-screen max-h-screen w-full ${$userPreferences.onboarding_done ? "lg:grid-cols-[20vw_1fr] " : ""}`}>
-    <div class={`hidden max-h-screen overflow-y-auto border-r bg-muted/40 ${$userPreferences.onboarding_done ? "lg:block" : ""}`}>
+<main class={`h-[calc(100vh-36px)] max-h-[calc(100vh-36px)] overflow-auto ${$windowBlurred ? "grayscale-no" : ""}`}>
+	<div class={`grid h-full w-full ${$userPreferences.onboarding_done ? "lg:grid-cols-[20vw_1fr] " : ""}`}>
+    <div class={`hidden max-h-full overflow-y-auto border-r bg-muted/40 ${$userPreferences.onboarding_done ? "lg:block" : ""}`}>
       <SidebarMenu />
     </div>
     <div class={`flex flex-col ${$userPreferences.onboarding_done ? "lg:max-w-[80vw]" : ""}`}>
@@ -207,6 +180,6 @@
 
 <style>
   .hack-section-height {
-    max-height: calc(100vh - 60px);
+    max-height: calc(100vh - 96px);
   }
 </style>

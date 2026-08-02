@@ -12,7 +12,7 @@ use crate::database::search::{
 use crate::db_sync::{run_sync_operation, sync_status, add_specific_folders};
 use crate::housekeeping::get_app_directory;
 use crate::indexing::{add_path_to_ignore_list, all_allowed_filetypes, clear_last_parsed_dates_from_db, get_all_ignored_paths, remove_nonexistent_and_ignored_files, remove_paths_from_ignore_list};
-use crate::user_prefs::{fix_global_shortcut_string, get_global_shortcut, get_modifiers_and_code_from_global_shortcut, is_global_shortcut_enabled, return_user_prefs_state, set_automatic_background_sync_flag_in_db, set_default_user_prefs, set_detailed_scan_flag_in_db, set_global_shortcut_flag_in_db, set_launch_at_startup_flag_in_db, set_manual_setup_flag_in_db, set_new_global_shortcut_in_db, set_onboarding_done_flag_in_db, set_roadmap_survey_answered_flag_in_db, set_show_search_suggestions_flag_in_db, set_parse_pdfs_flag_in_db, set_user_preferences_state_from_db_value};
+use crate::user_prefs::{fix_global_shortcut_string, get_global_shortcut, get_modifiers_and_code_from_global_shortcut, is_global_shortcut_enabled, return_user_prefs_state, set_automatic_background_sync_flag_in_db, set_default_user_prefs, set_detailed_scan_flag_in_db, set_global_shortcut_flag_in_db, set_launch_at_startup_flag_in_db, set_manual_setup_flag_in_db, set_new_global_shortcut_in_db, set_onboarding_done_flag_in_db, set_roadmap_survey_answered_flag_in_db, set_show_search_suggestions_flag_in_db, set_parse_pdfs_flag_in_db, set_enable_logs_flag_in_db, set_pdf_max_ocr_pages_in_db, set_user_preferences_state_from_db_value};
 use crate::utils::{extract_text_from_pdf, graceful_restart, read_image_to_base64, read_text_from_file, save_text_to_file};
 use crate::window::hide_or_show_window;
 use serde_json;
@@ -382,6 +382,10 @@ async fn set_user_preference(window: tauri::WebviewWindow, app_handle: tauri::Ap
       set_manual_setup_flag_in_db(value, &app_handle);
       set_user_preferences_state_from_db_value(&app_handle);
     }
+    "enable_logs" => {
+      set_enable_logs_flag_in_db(value, &app_handle);
+      set_user_preferences_state_from_db_value(&app_handle);
+    }
     "global_shortcut_enabled" => {
       set_global_shortcut_flag_in_db(value, &app_handle);
       set_user_preferences_state_from_db_value(&app_handle);
@@ -391,6 +395,15 @@ async fn set_user_preference(window: tauri::WebviewWindow, app_handle: tauri::Ap
       println!("Invalid key");
     } 
   }
+}
+
+// Set the maximum number of pages to OCR for scanned PDFs
+#[tauri::command]
+fn set_pdf_max_ocr_pages(app_handle: tauri::AppHandle, pages: i64) {
+  println!("Setting pdf max OCR pages to {}", pages);
+  let pages = pages.clamp(1, 5000);
+  set_pdf_max_ocr_pages_in_db(pages, &app_handle);
+  set_user_preferences_state_from_db_value(&app_handle);
 }
 
 // Set new global shortcut in DB and update the global shortcut
@@ -406,21 +419,6 @@ async fn set_new_global_shortcut(app_handle: tauri::AppHandle, new_shortcut_stri
   // restart the app to set the new shortcut
   // app_handle.restart();
 }
-
-// #[tauri::command]
-// async fn run_sidecar(app: tauri::AppHandle) {
-//   use tauri_plugin_shell::{ShellExt, process::CommandEvent};
-//   let sidecar_command = app.shell().sidecar("test").unwrap().args(["buzeeeeee"]);
-//   let (mut rx, mut _child) = sidecar_command.spawn().unwrap();
-//   let mut text = String::new();
-//   while let Some(event) = rx.recv().await {
-//     if let CommandEvent::Stdout(line) = event {
-//       let output_line = String::from_utf8(line).unwrap();
-//       text += &output_line;
-//       println!("sidecaaar text: {}", text);
-//     }
-//   }
-// }
 
 #[tauri::command]
 fn search_tantivy_files_index(app_handle: tauri::AppHandle, user_query: String, limit: i32, page: i32) -> Result<Vec<TantivyDocumentSearchResult>, Error> {
@@ -458,6 +456,18 @@ fn clear_index(app_handle: tauri::AppHandle) {
   let _ = delete_all_docs_from_index();
   // clear last_parsed timestamps from the database
   clear_last_parsed_dates_from_db(&mut conn);
+}
+
+// Rescan documents: grab new/missing files (rescan_all == false) or force
+// a full re-index including text/OCR re-extraction (rescan_all == true).
+#[tauri::command]
+async fn rescan_documents(rescan_all: bool, window: tauri::WebviewWindow, app: tauri::AppHandle) {
+  if rescan_all {
+    let mut conn = establish_connection(&app);
+    let _ = delete_all_docs_from_index();
+    clear_last_parsed_dates_from_db(&mut conn);
+  }
+  run_sync_operation(window, app, false, Vec::new()).await;
 }
 
 #[tauri::command]
@@ -502,6 +512,7 @@ pub fn initialize() {
       open_quicklook,
       open_context_menu,
       set_user_preference,
+      set_pdf_max_ocr_pages,
       set_new_global_shortcut,
       crate::drag::start_drag,
       get_user_preferences_state,
@@ -514,13 +525,14 @@ pub fn initialize() {
       search_tantivy_bookmarks_index,
       create_csv_dump,
       clear_index,
+      rescan_documents,
       get_chrome_user_profiles,
       get_arc_user_profiles,
       run_browser_history_search
     ])
     .plugin(tauri_plugin_shell::init())
-    .plugin(tauri_plugin_updater::Builder::new().build())
     .plugin(tauri_plugin_dialog::init())
+    .plugin(tauri_plugin_os::init())
     .setup(|app| {
         {
           // manage state(s)
@@ -549,10 +561,13 @@ pub fn initialize() {
         {
           if is_global_shortcut_enabled(app.handle()) {
             println!("Global Shortcut is enabled");
-            use tauri_plugin_global_shortcut::ShortcutState;
-            app.handle().plugin(
-              tauri_plugin_global_shortcut::Builder::new()
-                .with_shortcut(get_global_shortcut(app.handle()))?
+            use tauri_plugin_global_shortcut::{Builder, ShortcutState};
+            // Registration of the global shortcut is best-effort: the hotkey may
+            // already be claimed by the OS or another application (e.g. Alt+Space).
+            // A failure must not prevent the app from starting, so log and carry on.
+            let registration = (|| -> Result<(), Box<dyn std::error::Error>> {
+              let builder = Builder::new().with_shortcut(get_global_shortcut(app.handle()))?;
+              let plugin = builder
                 .with_handler(|app_handle, shortcut, event| {
                   if event.state == ShortcutState::Pressed {
                     let (global_shortcut_modifiers, global_shortcut_code) = get_modifiers_and_code_from_global_shortcut(app_handle);
@@ -564,8 +579,13 @@ pub fn initialize() {
                     }
                   }
                 })
-                .build(),
-            )?;
+                .build();
+              app.handle().plugin(plugin)?;
+              Ok(())
+            })();
+            if let Err(error) = registration {
+              println!("Failed to register the global shortcut ({}); continuing without it.", error);
+            }
           } else {
             println!("Global Shortcut is disabled");
           }

@@ -6,13 +6,12 @@
 	import { trackEvent } from '@aptabase/web';
 	import { invoke } from '@tauri-apps/api/core';
 	import { isMac, statusMessage, userPreferences, dbCreationInProgress, syncStatus } from '$lib/stores';
-	import { check } from '@tauri-apps/plugin-updater';
 	import { ask, open, message } from '@tauri-apps/plugin-dialog';
 	import * as Dialog from "$lib/components/ui/dialog";
   import Button from "$lib/components/ui/button/button.svelte";
 	import * as Select from "$lib/components/ui/select";
 	import { Switch } from "$lib/components/ui/switch";
-	import {PencilLine, TriangleAlert} from "lucide-svelte";
+	import {PencilLine, TriangleAlert, RefreshCw} from "lucide-svelte";
 	import Separator from '$lib/components/ui/separator/separator.svelte';
 	import Input from '$lib/components/ui/input/input.svelte';
 
@@ -29,6 +28,10 @@
 	let parsePDF: boolean;
 	let manualSetupMode: boolean;
 	let clearIndexDialogOpen = false;
+	let rescanDialogOpen = false;
+	let rescanInProgress = false;
+	let enableLogs: boolean;
+	let pdfMaxOcrPages: number;
 
 	function setKeydownHandlerOnGlobalShortuctInput(event: KeyboardEvent) {
 		console.log("~>>! pressed:", event.key);
@@ -114,6 +117,28 @@
 		});
 	}
 
+	function toggleEnableLogs() {
+		enableLogs = !enableLogs;
+		trackEvent('click:toggleEnableLogs', { enableLogs });
+		$statusMessage = enableLogs
+			? `Logging enabled. Restart the app to start writing logs.`
+			: `Logging disabled. Restart the app to stop writing logs.`;
+		setTimeout(() => {$statusMessage = "";}, 3000);
+		invoke("set_user_preference", {key: "enable_logs", value: enableLogs}).then(() => {
+			console.log("Set enable logs flag to: " + enableLogs);
+		});
+	}
+
+	function updatePdfMaxOcrPages() {
+		if (pdfMaxOcrPages < 1) pdfMaxOcrPages = 1;
+		trackEvent('click:updatePdfMaxOcrPages', { pdfMaxOcrPages });
+		$statusMessage = `Setting changed. Restart the app to take effect.`;
+		setTimeout(() => {$statusMessage = "";}, 3000);
+		invoke("set_pdf_max_ocr_pages", { pages: pdfMaxOcrPages }).then(() => {
+			console.log("Set PDF max OCR pages to: " + pdfMaxOcrPages);
+		});
+	}
+
 	function toggleAutomaticBackgroundSync() {
 		automaticBackgroundSyncEnabled = !automaticBackgroundSyncEnabled;
 		trackEvent('click:toggleAutomaticBackgroundSync', { automaticBackgroundSyncEnabled });
@@ -137,6 +162,31 @@
     trackEvent('click:clearIndex');
 		await invoke("clear_index");
 		$statusMessage = `Cleared!`;
+	}
+
+	async function rescanDocuments(rescanAll: boolean) {
+		trackEvent('click:rescanDocuments', { rescanAll });
+		rescanInProgress = true;
+		$statusMessage = rescanAll
+			? "Rescanning all documents..."
+			: "Rescanning for missing documents...";
+		$syncStatus = true;
+		try {
+			await invoke("rescan_documents", { rescanAll });
+			$statusMessage = rescanAll
+				? "Rescan complete! All documents re-indexed."
+				: "Rescan complete! Missing documents indexed.";
+		} catch (error) {
+			$statusMessage = "Rescan failed. Please try again.";
+			console.error(error);
+		} finally {
+			setTimeout(() => {
+				$statusMessage = "";
+				$syncStatus = false;
+				rescanInProgress = false;
+				rescanDialogOpen = false;
+			}, 3000);
+		}
 	}
 
 	function uninstallApp() {
@@ -216,41 +266,11 @@
 	}
 
 	async function checkForAppUpdates() {
-		// const update = { version: "v1.0.0", body: "buzee"};
-		const update = await check();
-		if (update === null) {
-			if ($isMac) {
-				await message('Failed to check for updates.\nPlease try again later.', {
-					title: 'Error',
-					kind: 'error',
-					okLabel: 'OK'
-				});
-				return;
-			} else {
-				await message('You are on the latest version. Stay awesome!', {
-					title: 'No Update Available',
-					kind: 'info',
-					okLabel: 'OK'
-				});
-			}
-		} else if (update.available) {
-			const yes = await ask(`Update to v${update.version} is available!\n\nRelease notes: ${update.body}`, {
-				title: 'Update Available',
-				kind: 'info',
-				okLabel: 'Update',
-				cancelLabel: 'Cancel'
-			});
-			if (yes) {
-				await update.downloadAndInstall();
-				await invoke("polite_restart");
-			}
-		} else {
-			await message('You are on the latest version. Stay awesome!', {
-				title: 'No Update Available',
-				kind: 'info',
-				okLabel: 'OK'
-			});
-		}
+		await message('Automatic updates are disabled in this build.', {
+			title: 'Updates Disabled',
+			kind: 'info',
+			okLabel: 'OK'
+		});
 	}
 
 	onMount(() => {
@@ -298,6 +318,8 @@
 			detailedScanEnabled = $userPreferences.detailed_scan;
 			parsePDF = $userPreferences.parse_pdfs;
 			manualSetupMode = $userPreferences.manual_setup;
+			enableLogs = $userPreferences.enable_logs;
+			pdfMaxOcrPages = $userPreferences.pdf_max_ocr_pages;
 		});
 	});
 </script>
@@ -518,6 +540,87 @@
 			</td>
 			<td>
 				<PopoverIcon title="Disabling this setting may improve the quality of search results but make the app buggy"/>
+			</td>
+		</tr>
+		<tr>
+			<td class="text-center px-2">
+				<Switch class="hover:data-[state=checked]:bg-violet-500" bind:checked={enableLogs} on:click={() => toggleEnableLogs()} />
+			</td>
+			<td class="py-2 skip-hover">
+				Enable Logging
+				<div class="flex items-center small-explanation gap-1">
+					<div>Writes diagnostic logs to a file in the app data directory. Requires an app restart.</div>
+				</div>
+			</td>
+			<td>
+				<PopoverIcon title="Logs are stored as buzee.log in the app data folder and are useful for troubleshooting."/>
+			</td>
+		</tr>
+		<tr>
+			<td class="text-center px-2">
+				<Button variant="outline" size="sm" type="button" on:click={() => updatePdfMaxOcrPages()}>Save</Button>
+			</td>
+			<td class="py-2 skip-hover">
+				Max OCR Pages per PDF
+				<div class="flex items-center small-explanation gap-1">
+					<div>Maximum number of pages of a scanned PDF that are OCR-ed. Larger values give better results but take longer.</div>
+				</div>
+			</td>
+			<td class="w-32">
+				<Input
+					type="number"
+					min="1"
+					bind:value={pdfMaxOcrPages}
+					class="h-9 w-full"
+				/>
+			</td>
+		</tr>
+		<tr class="hover:text-red-500">
+			<td class="text-center px-2">
+				<Dialog.Root bind:open={rescanDialogOpen}>
+					<Dialog.Trigger class="flex justify-center items-center w-full">
+						<RefreshCw class="h-6 w-6" />
+					</Dialog.Trigger>
+					<Dialog.Content>
+						<Dialog.Header>
+							<Dialog.Title>Rescan Documents</Dialog.Title>
+							<Dialog.Description>Choose what to rescan</Dialog.Description>
+						</Dialog.Header>
+						{#if rescanInProgress}
+							<p class="mb-0">Rescan in progress...</p>
+						{:else}
+							<p class="mb-0">
+								Buzee can rescan your files now to pick up documents that are missing from
+								the database, or force a full re-index of every document (including OCR of
+								PDFs and images).<br/><br/>
+								<strong>Rescan new documents</strong> only indexes files that are missing or
+								changed.<br/>
+								<strong>Rescan all documents</strong> re-extracts text and OCR from every file,
+								which can take a long time.
+							</p>
+						{/if}
+						<Dialog.Footer>
+							<Dialog.Close asChild let:builder>
+								<Button variant="secondary" aria-label="Close" builders={[builder]}>Close</Button>
+							</Dialog.Close>
+							<Button variant="secondary" on:click={() => rescanDocuments(false)} disabled={rescanInProgress}>
+								Rescan new documents
+							</Button>
+							<Button on:click={() => rescanDocuments(true)} disabled={rescanInProgress}>
+								Rescan all documents
+							</Button>
+						</Dialog.Footer>
+					</Dialog.Content>
+				</Dialog.Root>
+			</td>
+			<td class="py-2 skip-hover" role="button" on:click={() => {rescanDialogOpen = true;}}>
+				Rescan Documents
+				<div class="flex items-center small-explanation gap-1">
+					<div>Find missing documents or force a full re-index.</div>
+				</div>
+			</td>
+			<td>
+
 			</td>
 		</tr>
 		<tr>

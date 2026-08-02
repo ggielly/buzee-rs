@@ -3,7 +3,6 @@
 
 <p align="center"><span>Full-text search app for Mac and Windows</span></p>
 
-Download the latest release from the [Buzee website](https://buzee.thatgurjot.com/).
 
 ![Static Badge](https://img.shields.io/badge/Svelte%20v4-framework-orange?logo=svelte)
 ![Static Badge](https://img.shields.io/badge/Tauri%20v2-framework-blue?logo=tauri)
@@ -14,17 +13,16 @@ Download the latest release from the [Buzee website](https://buzee.thatgurjot.co
 
 </div>
 
-> ⚠️ I have _just_ open sourced Buzee. The documentation is lacking. Please open an issue and I'd be happy to help! ⚠️
-
-> The OCR capabilities in Buzee are built on top of [Textra on Mac](https://github.com/freedmand/textra) and [WinOCR on Windows](https://github.com/gsidhu/winocr_cli). Do check these repos out! I feel the native OCR capabilities of Mac and Windows are really good and should be used more!
+Note : this version is a fork from the original unmaintained [Buzee](https://github.com/gsidhu/buzee-tauri) v0.2.0 project. Many thanks to the original author for the original idea and the original code.
 
 ## What is Buzee?
 
 Buzee (pronounced _boozey_) is a eight-year-old labrador retriever who can't play fetch but can love you like no other.
 
+
 Buzee is also a full-text search application for your life. It helps you find your files, effortlessly.
 
-Download v0.2.0 from this [Releases](https://github.com/gsidhu/buzee-releases/releases) page.
+Also, download the forked v0.2.1 from [Releases](https://github.com/ggielly/buzee-releases/releases) page.
 
 ## Screenshots
 
@@ -35,22 +33,21 @@ Download v0.2.0 from this [Releases](https://github.com/gsidhu/buzee-releases/re
   <img src="./static/Screenshot4.png" width=25% />
 </div>
 
-
 ## Features
+
 - Fast, full-text search for all your documents, images, audio, video, folders, and browser history.
 - Search all local documents and folders by keyword, time, type, or any combination of these.
 - Ignore specific files or folders from being indexed. Or ignore only their content.
 - Global shortcut. Press `⎇ / Alt + Space` anywhere to show/hide the app. Modify it in the settings.
 - In the app, press `⌘ / Ctrl + F or K` to go to the search bar from any screen.
-- In the app, press `⌘ / Ctrl + Shift + S` to go to the scratchpad from any screen.
 - View statistics about your files and get your Unique Document Profile.
 - Sub-features:
   - Extract text from PDFs and Images using OCR.
-  - Use a Scratch Pad to quickly jot down notes.
 - Automatically syncs with changes on your filesystem.
 - Lightweight installation package and low memory usage.
-- Supports these default file types:
-```
+- Supports these default file types :
+
+```bash
 Documents: csv, docx, key, md, numbers, pages, pdf, pptx, txt, xlsx, xls
 Images: jpg, jpeg, png, gif
 Books: epub, mobi, azw3, pdf
@@ -58,13 +55,16 @@ Audio: mp3, wav, aac, flac, ogg
 Video: mp4, mkv, avi, mov, wmv
 ```
 
-### Semantic Search (somewhat)
-#### Include/Exclude from Search
+### Semantic search (somewhat)
+
+#### Include/exclude from search
+
 - Use the Filetype filter or simply type it in the search (like `invoice pdf`)
 - Put quotes around keyword(s) to search for the exact phrase (like `"annual report"`)
 - Put a hyphen in front of the keyword to exclude it from search (like `"annual report" -2022 -pdf`)
 
-#### Search using Time
+#### Search using time
+
 Use the Date Range filter or simply mention the date/time period that you are looking for in your search. For example:
 
 - <code><strong>last month</strong> pdf invoice</code>
@@ -76,8 +76,10 @@ Use the Date Range filter or simply mention the date/time period that you are lo
 
 If you want to use a phrase as a keyword for search and not time, simply wrap it in quotes like this: `invoice "March 2022"`
 
-## Building from Source
-Buzee works best on Mac. Windows may throw up some issues because I haven't had a change to properly test it. Linux is untested entirely, so you're on your own there.
+## Building from source
+
+Buzee works Windows, Linux, and Max but may throw up some issues because I haven't a mac :P
+Android is also supported ATM via tauri
 
 1. Clone the repository.
 2. Install Rust and NodeJS.
@@ -87,18 +89,20 @@ Buzee works best on Mac. Windows may throw up some issues because I haven't had 
 6. Run `npm run tauri build` in the root directory to build the app for production.
 
 ### Building on Windows
+
 Building on Windows requires a few changes. Follow these steps:
 
-1. Remove `drag = { path = "./crates/drag", version = "0.4.0", features = [ "serde" ] }` from [`Cargo.toml`](https://github.com/gsidhu/buzee-tauri/blob/main/src-tauri/Cargo.toml#L28C1-L28C77)
-2. Comment out `crate::drag::start_drag,` from [`ipc.rs`](https://github.com/gsidhu/buzee-tauri/blob/main/src-tauri/src/ipc.rs#L506C7-L506C31)
-3. Comment out `mod drag;` from [`main.rs`](https://github.com/gsidhu/buzee-tauri/blob/main/src-tauri/src/main.rs#L30)
+1. Remove `drag = { path = "./crates/drag", version = "0.4.0", features = [ "serde" ] }` from [`Cargo.toml`](https://github.com/ggielly/buzee-tauri/blob/main/src-tauri/Cargo.toml#L28C1-L28C77)
+2. Comment out `crate::drag::start_drag,` from [`ipc.rs`](https://github.com/ggielly/buzee-tauri/blob/main/src-tauri/src/ipc.rs#L506C7-L506C31)
+3. Comment out `mod drag;` from [`main.rs`](https://github.com/ggielly/buzee-tauri/blob/main/src-tauri/src/main.rs#L30)
 
-Finally, replace `binaries/textra` with `binaries/winocr` in [`tauri.conf.json`](https://github.com/gsidhu/buzee-tauri/blob/main/src-tauri/tauri.conf.json#L38).
+Finally, replace `binaries/textra` with `binaries/winocr` in [`tauri.conf.json`](https://github.com/ggielly/buzee-tauri/blob/main/src-tauri/tauri.conf.json#L38).
 
 ---
 
-## TODO / Known Issues
-```
+## TODO / known issues
+
+```bash
 Index:
 (~) : partly implemented
 (+) : has to be built from scratch
@@ -119,22 +123,36 @@ Index:
 - (+) Add tests to the codebase.
 - (?) Record frecency of documents and use it to sort search results.
 
-## Tech Stack
-### Dependencies
+## Tech stack
+
+### Dependencies on the v0.2.0
+
 Back-end:
-- Rust 
+
+- Rust
 - Tauri v2
 - SQLite
-- Tantivy
+
 
 Front-end:
+
 - Svelte 4 using TypeScript
 - shadcn-svelte
 - TailwindCSS
 
 See all dependencies in the [Cargo.toml](/src-tauri/Cargo.toml) and [package.json](/package.json) files.
 
+### Dependencies on the v0.2.1
+
+Back-end:
+
+- Rust 
+- Tauri v2
+- SQLite/
+- Tantivy
+
 ### Architecture
+
 - All file metadata is stored in SQLite in the `document` table. A central `metadata` table stores the metadata from files and eventually cloud services, emails etc. 
 - A full-text index is created on `metadata` and stored as the `metadata_fts` table.
 - Parsed text from documents is stored in the `body` table.
@@ -142,7 +160,8 @@ See all dependencies in the [Cargo.toml](/src-tauri/Cargo.toml) and [package.jso
 - The Firefox, Chrome and Arc history is searched using their respective history databases directly.
 - All front-end code is in the `src` directory. All back-end code is in the `src-tauri` directory.
 
-## Contributing / Way Forward
+## Contributing / way forward
+
 Read the [Vision and Roadmap](./VISION&ROADMAP).
 
 I have spent two years building this project. It started as an Electron app, then I switched to Tauri for performance gains. When I started I barely new JavaScript and Svelte. Over the course of development, I learned NodeJS, TypeScript, SQLite, Rust, Tauri, Tantivy, and many other technologies. I learned so much about managing a project of this size and complexity. I am proud of what I have built but I am more proud of what I have learned.
@@ -154,4 +173,7 @@ If nothing else, this project can serve as an example of how to build a full-tex
 If you do do something with this project, please let me know. I would love to see what you build!
 
 ## License
-MIT
+
+Original code from is licenced under the MIT licence.
+
+The rest of the code since the fork is licensed under the AGPL.
