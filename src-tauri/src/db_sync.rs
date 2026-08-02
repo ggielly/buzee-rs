@@ -49,7 +49,7 @@ pub async fn run_sync_operation(window: tauri::WebviewWindow, app: AppHandle, sw
       if detailed_scan_allowed {
         // Then start parsing the content of all files and add it to the body table
         println!("Parsing content from files");
-        let files_parsed = parse_content_from_files(&mut new_conn, app.clone()).await;
+        let files_parsed = parse_content_from_files(&mut new_conn, window.clone(), app.clone()).await;
         println!("Files parsed: {}", files_parsed);
       }
       // Emit closing sync status to the frontend

@@ -375,7 +375,7 @@ pub fn add_file_metadata_to_database(files_array: &Vec<DocumentItem>, connection
     }
 }
 
-pub async fn parse_content_from_files(conn: &mut SqliteConnection, app: tauri::AppHandle) -> usize {
+pub async fn parse_content_from_files(conn: &mut SqliteConnection, window: tauri::WebviewWindow, app: tauri::AppHandle) -> usize {
   let mut files_parsed = 0;
 
   let document_filetypes = ["docx", "md", "pptx", "txt", "epub"];
@@ -467,6 +467,15 @@ pub async fn parse_content_from_files(conn: &mut SqliteConnection, app: tauri::A
 
   // Get sync_running status
   let mut sync_running = sync_status(&app).0;
+  let total_to_parse = all_files_data.len();
+
+  // Emit an initial progress message so the frontend can show a determinate bar.
+  send_message_to_frontend(
+    &window,
+    "scan-progress".to_string(),
+    "scan_started".to_string(),
+    format!("{}", total_to_parse),
+  );
 
   // Set up body_tantivy_items and body_items
   let mut body_items: Vec<BodyItem> = vec![];
@@ -539,7 +548,15 @@ pub async fn parse_content_from_files(conn: &mut SqliteConnection, app: tauri::A
       average_body_file_size = body_file_size_sum / body_file_size_count;
       files_parsed += 1;
 
+      // Emit progressive scan progress to the frontend (e.g. every 50 files) so
+      // the status bar can show a live progress bar and a scan speed.
       if files_parsed % 50 == 0 {
+        send_message_to_frontend(
+          &window,
+          "scan-progress".to_string(),
+          "scan_progress".to_string(),
+          format!("{}/{}", files_parsed, total_to_parse),
+        );
         log::info!("{} files parsed", files_parsed);
       }
 

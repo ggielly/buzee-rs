@@ -453,6 +453,14 @@ pub fn get_counts_for_all_filetypes(
     Ok(counts)
 }
 
+// Get total number of documents in the database (all indexed files).
+pub fn get_total_document_count(
+    conn: &mut SqliteConnection,
+) -> Result<i64, diesel::result::Error> {
+    use crate::database::schema::document::dsl::*;
+    document.count().get_result(conn)
+}
+
 // Get counts for total files and num files parsed
 pub fn get_file_parsed_count(mut conn: PooledConnection<ConnectionManager<SqliteConnection>>) -> Result<i64, diesel::result::Error> {
     use crate::database::schema::document::dsl::*;

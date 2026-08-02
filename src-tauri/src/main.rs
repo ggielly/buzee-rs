@@ -26,6 +26,7 @@ mod firefox_read;
 mod housekeeping;
 mod indexing;
 mod ipc;
+mod statistics;
 mod tantivy_index;
 mod text_extraction;
 mod user_prefs;

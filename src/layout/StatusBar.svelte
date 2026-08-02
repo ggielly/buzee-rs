@@ -12,6 +12,7 @@
 	import { invoke } from '@tauri-apps/api/core';
 	import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 	import { trackEvent } from '@aptabase/web';
+	import { appStatistics, type AppStatistics } from '$lib/stores';
 	
 	let darkMode = false;
 	let fileSyncFinished = false;
@@ -22,6 +23,14 @@
 	let showingResults: boolean = false;
 	let dbReady = false;
 	let filesAddedCount = 0;
+	let scanSpeed = 0; // files per second
+	let lastFilesCount = 0;
+	let lastFilesTimestamp = 0;
+	let parseProgress = 0; // files parsed in the text/OCR phase
+	let parseTotal = 0; // total files to parse in that phase
+	let stats: AppStatistics | null = null;
+	let countdownSeconds = 0;
+	let statsTimer: ReturnType<typeof setInterval> | undefined;
 
 	function showStatusBarMenu(option: string) {
 		// invoke("open_context_menu", {option:"statusbar"}).then((res) => {});
@@ -100,10 +109,54 @@
 
 	function update_files_added_count(filesAddedPayload: Payload) {
 		filesAddedCount = parseInt(filesAddedPayload.data);
+		// Compute the scan speed from the files counted since the previous event
+		// and the wall-clock time that elapsed between the two events. Events
+		// arrive roughly every 500 files, which gives a smooth-enough average
+		// without over-sampling.
+		const now = Date.now();
+		if (lastFilesTimestamp > 0 && filesAddedCount > lastFilesCount) {
+			const deltaFiles = filesAddedCount - lastFilesCount;
+			const deltaMs = now - lastFilesTimestamp;
+			if (deltaMs > 0) {
+				scanSpeed = (deltaFiles / deltaMs) * 1000;
+			}
+		}
+		lastFilesCount = filesAddedCount;
+		lastFilesTimestamp = now;
 		if (filesAddedPayload.message == "files_added_complete") {
 			$dbCreationInProgress = false;
 			dbReady = true;
 		}
+	}
+
+	async function refreshStatistics() {
+		try {
+			stats = await invoke<AppStatistics>("get_app_statistics");
+			$appStatistics = stats;
+			if (stats && stats.next_scan_in_seconds >= 0) {
+				countdownSeconds = stats.next_scan_in_seconds;
+			}
+		} catch (err) {
+			console.warn("Failed to load app statistics", err);
+		}
+	}
+
+	function formatCountdown(totalSeconds: number): string {
+		if (totalSeconds < 0) return '';
+		const m = Math.floor(totalSeconds / 60);
+		const s = totalSeconds % 60;
+		return `${m}:${s.toString().padStart(2, '0')}`;
+	}
+
+	function formatSize(bytes: number): string {
+		if (bytes >= 1073741824) return (bytes / 1073741824).toFixed(1) + ' GB';
+		if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + ' MB';
+		if (bytes >= 1024) return (bytes / 1024).toFixed(1) + ' KB';
+		return bytes + ' B';
+	}
+
+	function statusLabel(status: string): string {
+		return status.charAt(0).toUpperCase() + status.slice(1);
 	}
 
 	// FOR ONBOARDING PROCESS
@@ -113,6 +166,8 @@
 	let unlisten_sync_status:UnlistenFn;
 	// FOR FILE SYNC FINISHED
 	let unlisten_file_sync_finished:UnlistenFn;
+	// FOR TEXT/OCR PARSE PHASE PROGRESS
+	let unlisten_scan_progress:UnlistenFn;
 
 	onMount(async () => {
 		invoke("get_os").then((res) => {
@@ -139,23 +194,57 @@
 		// Listener for sync status changes from inside the Tokio process in db_sync.rs
 		unlisten_sync_status = await listen<Payload>('sync-status', (event: any) => {
 			$syncStatus = event.payload.data === 'true';
+			if (event.payload.data === 'true') {
+				// Reset the scan-speed window for a fresh scan: the backend resets
+				// its per-scan counter, so we must too before the next files-added.
+				lastFilesCount = 0;
+				lastFilesTimestamp = 0;
+				scanSpeed = 0;
+			}
 		});
 		// Listener for when the db_sync process is done
 		unlisten_file_sync_finished = await listen<Payload>('file-sync-finished', (event: any) => {
 			fileSyncFinished = event.payload.data === 'true';
 		});
+		// Listener for the text/OCR parsing phase progress (scan-progress).
+		// payload message "scan_started" carries the total, "scan_progress" carries
+		// "processed/total" as its data string.
+		unlisten_scan_progress = await listen<Payload>('scan-progress', (event: any) => {
+			if (event.payload.message === 'scan_started') {
+				parseProgress = 0;
+				parseTotal = Number(event.payload.data);
+			} else if (event.payload.message === 'scan_progress') {
+				const [processed, total] = event.payload.data.split('/');
+				parseProgress = Number(processed) || 0;
+				parseTotal = Number(total) || 0;
+			}
+		});
 
 		// Ask for sync status on each mount to keep it updated in case of page changes
 		$syncStatus = await invoke("get_sync_status") === 'true';
+
+		// Load the status bar statistics, then refresh them periodically and tick
+		// the "next scan" countdown every second.
+		await refreshStatistics();
+		statsTimer = setInterval(() => {
+			if (stats && stats.auto_sync_enabled && stats.status !== 'scanning' && countdownSeconds > 0) {
+				countdownSeconds -= 1;
+			} else if (stats && (stats.status === 'scanning' || countdownSeconds <= 0)) {
+				// Re-fetch so counts/size/state stay accurate after a scan.
+				refreshStatistics();
+			}
+		}, 1000);
 
 		// on renderer launch
 		appMode = "window";
 	});
 
 	onDestroy(() => {
+		if (statsTimer) clearInterval(statsTimer);
 		unlisten_files_added();
 		unlisten_sync_status();
 		unlisten_file_sync_finished();
+		unlisten_scan_progress();
 	});
 </script>
 
@@ -169,6 +258,60 @@
 >
 	<!-- Left end -->
 	<div class="relative flex-grow max-w-full flex-1 px-0 flex justify-start disable-select cursor-default" id="status-bar-left">
+		{#if stats}
+			{#if stats.status === 'scanning'}
+				<span class="status-pill status-scanning" title="A background scan is running">
+					<i class="bi bi-arrow-repeat spin-right" />
+					{#if parseTotal > 0}
+						Extracting text&hellip; {parseProgress}/{parseTotal}
+					{:else}
+						Scanning…
+					{/if}
+					{#if scanSpeed > 0}
+						<span class="scan-speed">({scanSpeed.toFixed(1)} files/s)</span>
+					{/if}
+				</span>
+				{#if parseTotal > 0}
+					<span class="status-stat scan-progress-bar" title={`Extracting text from ${parseTotal} files`}>
+						<div class="progress">
+							<div
+								class="progress-bar progress-bar-striped"
+								id="scan-progress-bar"
+								role="progressbar"
+								style={`width: ${(parseProgress / parseTotal) * 100}%`}
+								aria-valuenow={parseProgress}
+								aria-valuemin={0}
+								aria-valuemax={parseTotal}
+							/>
+						</div>
+					</span>
+				{/if}
+			{:else if stats.status === 'ready'}
+				<span class="status-pill status-ready" title="Automatic scan is enabled">
+					<i class="bi bi-dot" />
+					Ready
+				</span>
+			{:else}
+				<span class="status-pill status-idle" title="Automatic scan is off">
+					<i class="bi bi-dot" />
+					Idle
+				</span>
+			{/if}
+			<span class="status-stat" title="Files in the index">
+				<i class="bi bi-files" />
+				{stats.total_files}
+			</span>
+			<span class="status-stat" title="Database size">
+				<i class="bi bi-database" />
+				{formatSize(stats.database_size_bytes)}
+			</span>
+			{#if stats.auto_sync_enabled && stats.status !== 'scanning'}
+				<span class="status-stat" title="Time until the next automatic scan">
+					<i class="bi bi-clock" />
+					{formatCountdown(countdownSeconds)} until next scan
+				</span>
+			{/if}
+		{/if}
 		{#if $userPreferences.onboarding_done}
 			{#if $onSearchPage}
 				<!-- <button
@@ -344,6 +487,43 @@
 	.status-item:hover {
 		background-color: rgba(255, 255, 255, 0.12);
 		cursor: pointer;
+	}
+	.status-pill {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.25em;
+		padding: 0 0.5em;
+		margin-right: 0.75em;
+		border-radius: 1em;
+		font-weight: 600;
+		line-height: 1.5em;
+		background-color: rgba(0, 0, 0, 0.25);
+	}
+	.status-pill i {
+		font-size: 1.1em;
+	}
+	.status-scanning {
+		background-color: #e8556d;
+	}
+	.scan-speed {
+		font-weight: 400;
+		opacity: 0.85;
+	}
+	.status-ready {
+		background-color: #21a366;
+	}
+	.status-idle {
+		background-color: rgba(255, 255, 255, 0.2);
+	}
+	.status-stat {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.35em;
+		margin-right: 1em;
+		opacity: 0.95;
+	}
+	.status-stat i {
+		font-size: 1.05em;
 	}
 	button {
 		all: unset;

@@ -19,6 +19,53 @@
 
 	let pathToIgnore = "";
 
+	// Infinite-scroll state: how many rows from the full `rows` list are rendered
+	// (grows as the user scrolls). `rows` contains every doc loaded so far.
+	let visibleCount = 0;
+	let loadingMore = false;
+	let visibleRows: any = [];
+
+	$: if ($documentsShown) {
+		// Reset the rendered window for a new result set.
+		visibleCount = Math.min($pageSize, rows.length);
+	}
+
+	// The rows currently rendered: a growing slice of the full loaded results.
+	$: visibleRows = rows.slice(0, visibleCount);
+
+	// Detect when the user is near the bottom of the visible results and fetch
+	// the next batch (reveal more rows, then load more docs from the DB).
+	function onScrollContainer(event: Event) {
+		const el = event.currentTarget as HTMLElement;
+		if (!el) return;
+		const threshold = 150; // px before the bottom counts as "near the end"
+		if (el.scrollTop + el.clientHeight >= el.scrollHeight - threshold) {
+			increaseVisibleCount();
+		}
+	}
+
+	function increaseVisibleCount() {
+		// Reveal one more page of the currently-loaded results.
+		visibleCount = Math.min(visibleCount + $pageSize, rows.length);
+		// If we've rendered every row loaded so far and there may be more docs in
+		// the DB, load the next page and keep the infinite-scroll effect going.
+		if (visibleCount >= rows.length && !$noMoreResults && !loadingMore) {
+			void loadMoreThenExtend();
+		}
+	}
+
+	async function loadMoreThenExtend() {
+		if (loadingMore || $searchInProgress || $noMoreResults) return;
+		loadingMore = true;
+		try {
+			await loadMoreResults();
+			// Re-arm the visible window now that the table has more rows.
+			visibleCount = Math.min(visibleCount + $pageSize, rows.length);
+		} finally {
+			loadingMore = false;
+		}
+	}
+
 	function showHideColumn(colID: string) {
 		console.log("Hiding column", colID);
 		trackEvent('right_click:resultTableHeaderContextMenu', {colID});
@@ -112,9 +159,9 @@
 </script>
 
 {#if $showIconGrid}
-	<div id="parent-grid" class="flex flex-col">
+	<div id="parent-grid" class="flex flex-col" on:scroll={onScrollContainer}>
 		<div class={`file-grid p-2 ${$compactViewMode ? 'gap-2' : 'gap-4'}`}>
-			{#each $pageRows as row (row.id)}
+			{#each visibleRows as row (row.id)}
 				<ContextMenu.Root>
 					<ContextMenu.Trigger>
 					<button

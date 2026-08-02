@@ -210,6 +210,32 @@ impl Default for SyncRunningState {
   }
 }
 
+// Statistics shown in the status bar.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct AppStatistics {
+  pub status: String,
+  pub total_files: i64,
+  pub parsed_files: i64,
+  pub database_size_bytes: u64,
+  pub last_scan_time: i64,
+  pub next_scan_in_seconds: i64,
+  pub auto_sync_enabled: bool,
+}
+
+impl Default for AppStatistics {
+  fn default() -> Self {
+    Self {
+      status: "idle".to_string(),
+      total_files: 0,
+      parsed_files: 0,
+      database_size_bytes: 0,
+      last_scan_time: 0,
+      next_scan_in_seconds: -1,
+      auto_sync_enabled: false,
+    }
+  }
+}
+
 // Struct for Global Shortcut String
 #[derive(Serialize, Clone)]
 pub(crate) struct GlobalShortcutState {

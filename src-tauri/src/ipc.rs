@@ -3,7 +3,7 @@
 
 use crate::arc_read::get_arc_profiles;
 use crate::chrome_read::get_chrome_profiles;
-use crate::custom_types::{ContextMenuState, DBConnPoolState, DBStat, DateLimit, Error, Payload, SyncRunningState, TantivyBookmarkSearchResult, TantivyDocumentSearchResult, TantivyReaderState, UserPreferencesState};
+use crate::custom_types::{ContextMenuState, DBConnPoolState, DBStat, DateLimit, Error, Payload, SyncRunningState, TantivyBookmarkSearchResult, TantivyDocumentSearchResult, TantivyReaderState, UserPreferencesState, AppStatistics};
 use crate::database::{establish_connection, get_connection_pool};
 use crate::database::models::{DocumentSearchResult, IgnoreList};
 use crate::database::search::{
@@ -187,6 +187,12 @@ async fn show_ignored_paths(app: tauri::AppHandle) -> Result<Vec<IgnoreList>, Er
 fn get_sync_status(app: tauri::AppHandle) -> Result<String, Error> {
   let sync_running = sync_status(&app).0;
   Ok(sync_running)
+}
+
+// Get the aggregate statistics shown in the status bar.
+#[tauri::command]
+fn get_app_statistics(app: tauri::AppHandle) -> AppStatistics {
+  crate::statistics::get_app_statistics(&app)
 }
 
 // Get search suggestions
@@ -500,6 +506,7 @@ pub fn initialize() {
       run_file_indexing,
       run_file_sync,
       get_sync_status,
+      get_app_statistics,
       get_search_suggestions,
       run_search,
       get_recent_docs,
