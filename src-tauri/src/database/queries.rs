@@ -127,23 +127,18 @@ pub const METADATA_FTS_VIRTUAL_TABLE_CREATE_STATEMENT : &str = r#"
 "#;
 
 /*
-  BODY FTS VIRTUAL TABLE
-  All fields from the body table are added here but only body is indexed
-  metadata_id is kept for joining with the metadata table
-  content is set to the `body` table
-  tokenize is set to use the porter stemmer algorithm and unicode61 tokenizer (more suitable than ascii)
+  INDEXES ON DOCUMENT TABLE
+  Speed up frequent lookups by path, file_type, and last_modified.
 */
-pub const _BODY_FTS_VIRTUAL_TABLE_CREATE_STATEMENT : &str = r#"
-  CREATE VIRTUAL TABLE IF NOT EXISTS body_fts 
-  USING fts5(
-    metadata_id UNINDEXED,
-    text,
-    title,
-    url,
-    last_parsed UNINDEXED,
-    content=body,
-    tokenize="porter unicode61"
-  );
+pub const DOCUMENT_INDEXES : &str = r#"
+  CREATE INDEX IF NOT EXISTS idx_document_path ON document(path);
+  CREATE INDEX IF NOT EXISTS idx_document_file_type ON document(file_type);
+  CREATE INDEX IF NOT EXISTS idx_document_last_modified ON document(last_modified);
+  CREATE INDEX IF NOT EXISTS idx_document_last_parsed ON document(last_parsed);
+  CREATE INDEX IF NOT EXISTS idx_document_is_pinned ON document(is_pinned);
+  CREATE INDEX IF NOT EXISTS idx_metadata_source_id ON metadata(source_id);
+  CREATE INDEX IF NOT EXISTS idx_body_source_id ON body(source_id);
+  CREATE INDEX IF NOT EXISTS idx_body_metadata_id ON body(metadata_id);
 "#;
 
 /*
@@ -200,39 +195,6 @@ pub const TRIGGER_UPDATE_DOCUMENT_METADATA : &str = r#"
 //   END;
 // "#;
 
-
-/*
-  BODY FTS TRIGGERS
-  Triggers to keep the Body FTS virtual table updated when the body table is updated
-*/
-
-pub const _TRIGGER_INSERT_BODY_FTS : &str = r#"
-  CREATE TRIGGER IF NOT EXISTS body_fts_insert_trigger
-  AFTER INSERT ON body
-  BEGIN
-      INSERT INTO body_fts (metadata_id, text, title, url, last_parsed)
-      VALUES (NEW.metadata_id, NEW.text, NEW.title, NEW.url, NEW.last_parsed);
-  END;
-"#;
-
-pub const _TRIGGER_UPDATE_BODY_FTS : &str = r#"
-  CREATE TRIGGER IF NOT EXISTS body_fts_update_trigger
-  AFTER UPDATE ON body
-  BEGIN
-      UPDATE body_fts
-      SET text = NEW.text
-      WHERE metadata_id = NEW.metadata_id;
-  END;
-"#;
-
-// Don't need this because deleting from body automatically removes from body_fts
-// pub const TRIGGER_DELETE_BODY_FTS : &str = r#"
-//   CREATE TRIGGER IF NOT EXISTS body_fts_delete_trigger
-//   BEFORE DELETE ON body
-//   BEGIN
-//       DELETE FROM body_fts WHERE metadata_id = old.metadata_id;
-//   END;
-// "#;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////

@@ -101,6 +101,33 @@ declare global {
     count: number
   }
 
+  interface DashboardBuckets {
+    file_type: string,
+    count: number,
+    size_bytes: number
+  }
+
+  interface DashboardStats {
+    total_files: number,
+    total_folders: number,
+    total_size_bytes: number,
+    average_size_bytes: number,
+    largest_file_size_bytes: number,
+    parsed_files: number,
+    parsed_total_size_bytes: number,
+    unparsed_files: number,
+    pinned_files: number,
+    most_frequent_count: number,
+    database_size_bytes: number,
+    last_scan_time: number,
+    next_scan_in_seconds: number,
+    auto_sync_enabled: boolean,
+    scan_running: boolean,
+    filetype_counts: DashboardBuckets[],
+    top_largest: DocumentSearchResult[],
+    top_recent: DocumentSearchResult[],
+  }
+
   interface DateLimit {
     start: string,
     end: string,

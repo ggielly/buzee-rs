@@ -1,11 +1,10 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
-	import { documentsShown, ignoreDialogOpen, locationShown, preferLastOpened, shiftKeyPressed, compactViewMode, selectedResult, showResultTextPreview, noMoreResults, searchInProgress, showIconGrid, base64Images, isMac } from '$lib/stores';
+	import { onMount, onDestroy } from 'svelte';
+	import { documentsShown, ignoreDialogOpen, locationShown, preferLastOpened, shiftKeyPressed, compactViewMode, selectedResult, showResultTextPreview, noMoreResults, searchInProgress, showIconGrid, base64Images, isMac, resultsPageShown } from '$lib/stores';
 	import FileTypeIcon from '$lib/components/ui/FileTypeIcon.svelte';
 	import { stringToHash, resetColumnSize } from '$lib/utils/miscUtils';
 	import { clickRow } from '$lib/utils/fileUtils';
 	import { trackEvent } from '@aptabase/web';
-	import { Button } from "$lib/components/ui/button";
 	import * as ContextMenu from "$lib/components/ui/context-menu";
 	import ResultTextPreview from "./ResultTextPreview.svelte";
 	import { openFileFolder, openFile, formatPath, startDragging } from '$lib/utils/searchItemUtils';
@@ -19,48 +18,40 @@
 
 	let pathToIgnore = "";
 
-	// Infinite-scroll state: how many rows from the full `rows` list are rendered
-	// (grows as the user scrolls). `rows` contains every doc loaded so far.
-	let visibleCount = 0;
+	// Infinite-scroll state: whether a load-more request is currently in flight.
 	let loadingMore = false;
-	let visibleRows: any = [];
+	// Sentinel element that triggers loading more results when it scrolls into view.
+	let loadMoreSentinel: HTMLDivElement | null = null;
+	let sentinelObserver: IntersectionObserver | null = null;
 
-	$: if ($documentsShown) {
-		// Reset the rendered window for a new result set.
-		visibleCount = Math.min($pageSize, rows.length);
+	$: if (loadMoreSentinel) {
+		sentinelObserver?.disconnect();
+		sentinelObserver = new IntersectionObserver(
+			(entries) => {
+				if (entries.some((entry) => entry.isIntersecting)) {
+					void loadMoreThenExtend();
+				}
+			},
+			// Pre-trigger when the sentinel is within 150px of the viewport
+			// bottom, so the next page starts loading slightly before it is seen.
+			{ rootMargin: '0px 0px 150px 0px' }
+		);
+		sentinelObserver.observe(loadMoreSentinel);
 	}
 
-	// The rows currently rendered: a growing slice of the full loaded results.
-	$: visibleRows = rows.slice(0, visibleCount);
+	onDestroy(() => {
+		sentinelObserver?.disconnect();
+	});
 
-	// Detect when the user is near the bottom of the visible results and fetch
-	// the next batch (reveal more rows, then load more docs from the DB).
-	function onScrollContainer(event: Event) {
-		const el = event.currentTarget as HTMLElement;
-		if (!el) return;
-		const threshold = 150; // px before the bottom counts as "near the end"
-		if (el.scrollTop + el.clientHeight >= el.scrollHeight - threshold) {
-			increaseVisibleCount();
-		}
-	}
-
-	function increaseVisibleCount() {
-		// Reveal one more page of the currently-loaded results.
-		visibleCount = Math.min(visibleCount + $pageSize, rows.length);
-		// If we've rendered every row loaded so far and there may be more docs in
-		// the DB, load the next page and keep the infinite-scroll effect going.
-		if (visibleCount >= rows.length && !$noMoreResults && !loadingMore) {
-			void loadMoreThenExtend();
-		}
-	}
+	// Render every row loaded so far. `rows` is the full (unpaged) store the
+	// table produces from $documentsShown, so no local pagination is needed.
+	$: allRows = $rows as typeof $pageRows;
 
 	async function loadMoreThenExtend() {
 		if (loadingMore || $searchInProgress || $noMoreResults) return;
 		loadingMore = true;
 		try {
 			await loadMoreResults();
-			// Re-arm the visible window now that the table has more rows.
-			visibleCount = Math.min(visibleCount + $pageSize, rows.length);
 		} finally {
 			loadingMore = false;
 		}
@@ -119,11 +110,16 @@
 		}
 		// @ts-ignore
 		columnsArray = columns.map((column: any) => ({ id: column.id, header: column.header }));
-		// select the first result when loading new search results
-		$selectedResult = $documentsShown[0];
-		let firstResult = document.querySelector('.result-0') as HTMLElement | null;
-		if (firstResult) {
-			firstResult.focus();
+		// Select and focus the first result only on a fresh search (page 0). When
+		// infinite scroll appends more results, re-selecting and focusing the first
+		// row would scroll the container back to the top and trap the user on the
+		// first page.
+		if ($resultsPageShown === 0) {
+			$selectedResult = $documentsShown[0];
+			let firstResult = document.querySelector('.result-0') as HTMLElement | null;
+			if (firstResult) {
+				firstResult.focus({ preventScroll: true });
+			}
 		}
 		resetColumnSize();
 	}
@@ -147,7 +143,7 @@
 		$selectedResult = $documentsShown[0];
 		let firstResult = document.querySelector('.result-0') as HTMLElement | null;
 		if (firstResult) {
-			firstResult.focus();
+			firstResult.focus({ preventScroll: true });
 		}
 		resetColumnSize();
 
@@ -159,9 +155,9 @@
 </script>
 
 {#if $showIconGrid}
-	<div id="parent-grid" class="flex flex-col" on:scroll={onScrollContainer}>
+	<div id="parent-grid" class="flex flex-col">
 		<div class={`file-grid p-2 ${$compactViewMode ? 'gap-2' : 'gap-4'}`}>
-			{#each visibleRows as row (row.id)}
+			{#each allRows as row (row.id)}
 				<ContextMenu.Root>
 					<ContextMenu.Trigger>
 					<button
@@ -215,6 +211,19 @@
 			</ContextMenu.Root>
 			{/each}
 		</div>
+		{#if $documentsShown.length > 0}
+			<div class="infinite-footer" bind:this={loadMoreSentinel}>
+				<div class="scroll-fade" aria-hidden="true"></div>
+				<div class="flex w-full items-center justify-center gap-2 py-2" id="load-more-indicator">
+					{#if $searchInProgress}
+						<LoaderCircle class="h-4 w-4 animate-spin text-muted-foreground" />
+						<Label class="font-normal text-sm text-muted-foreground">Loading more results&hellip;</Label>
+					{:else if $noMoreResults}
+						<Label class="font-normal text-sm text-muted-foreground">You've reached the end of the results</Label>
+					{/if}
+				</div>
+			</div>
+		{/if}
 	</div>
 {:else}
 	<table {...$tableAttrs} class="block w-full relative border-spacing-0">
@@ -290,7 +299,7 @@
 		</thead>
 		{#if $documentsShown.length > 0}
 			<tbody {...$tableBodyAttrs}>
-				{#each $pageRows as row (row.id)}
+				{#each allRows as row (row.id)}
 					<Subscribe rowAttrs={row.attrs()} let:rowAttrs>
 						<ContextMenu.Root>
 							<ContextMenu.Trigger>
@@ -373,39 +382,20 @@
 			</tbody>
 		{/if}
 	</table>
+	{#if $documentsShown.length > 0}
+		<div class="infinite-footer" bind:this={loadMoreSentinel}>
+			<div class="scroll-fade" aria-hidden="true"></div>
+			<div class="flex w-full items-center justify-center gap-2 py-2" id="load-more-indicator">
+				{#if $searchInProgress}
+					<LoaderCircle class="h-4 w-4 animate-spin text-muted-foreground" />
+					<Label class="font-normal text-sm text-muted-foreground">Loading more results&hellip;</Label>
+				{:else if $noMoreResults}
+					<Label class="font-normal text-sm text-muted-foreground">You've reached the end of the results</Label>
+				{/if}
+			</div>
+		</div>
+	{/if}
 {/if}
-
-<!-- Add `absolute` below -->
-<div class="w-full bottom-0 bg-white z-100 flex items-center justify-center space-x-4 p-2">
-	<Button
-		variant="outline"
-		size="sm"
-		class="text-sm"
-		id="previous-page-results"
-		on:click={() => ($pageIndex = $pageIndex - 1)}
-		disabled={!$hasPreviousPage}>Previous</Button
->
-	<Label class="font-normal text-sm">Page {$pageIndex + 1}</Label>
-	<Button
-		variant="outline"
-		size="sm"
-		class="text-sm"
-		id="next-page-results"
-		disabled={!$hasNextPage && $noMoreResults}
-		on:click={async () => {
-			let currentPage = $pageIndex;
-			let gotNewResults = false;
-			if (!$hasNextPage && !$noMoreResults) { await loadMoreResults(); gotNewResults = true; }
-			if (gotNewResults && $documentsShown.length % $pageSize > 0) { $pageIndex = currentPage; }
-			else if ($hasNextPage) { $pageIndex = currentPage + 1; }
-		}}>
-			{#if $searchInProgress}
-				<LoaderCircle class="mr-2 h-4 w-4 animate-spin" />
-			{:else}
-				Next
-			{/if}
-		</Button>
-</div>
 
 {#key $selectedResult}
 	<ResultTextPreview open={$showResultTextPreview} />
@@ -547,5 +537,21 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  // Infinite-scroll footer with a gradient fade over the bottom of the results.
+  .infinite-footer {
+    position: relative;
+    width: 100%;
+  }
+  .scroll-fade {
+    position: absolute;
+    inset-inline: 0;
+    bottom: 100%;
+    height: 96px;
+    // Gradient fade hiding the end of the list (adapts to the app background).
+    background: linear-gradient(to bottom, transparent, var(--bs-body-bg, #ffffff));
+    pointer-events: none;
+    z-index: 5;
   }
 </style>

@@ -74,7 +74,7 @@ fn base_directory() -> Option<String> {
 }
 
 /// Size in bytes of the main SQLite database file plus its WAL file.
-fn database_file_size() -> u64 {
+pub fn database_file_size() -> u64 {
   let Some(base) = base_directory() else {
     return 0;
   };

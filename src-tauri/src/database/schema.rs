@@ -64,16 +64,6 @@ table! {
   }
 }
 
-table! {
-  body_fts (metadata_id) {
-      metadata_id -> Integer,
-      text -> Text,
-      title -> Text,
-      url -> Text,
-      last_parsed -> BigInt,
-  }
-}
-
 joinable!(body -> metadata (metadata_id));
 joinable!(document -> metadata (id));
 

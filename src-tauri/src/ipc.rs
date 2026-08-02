@@ -3,7 +3,7 @@
 
 use crate::arc_read::get_arc_profiles;
 use crate::chrome_read::get_chrome_profiles;
-use crate::custom_types::{ContextMenuState, DBConnPoolState, DBStat, DateLimit, Error, Payload, SyncRunningState, TantivyBookmarkSearchResult, TantivyDocumentSearchResult, TantivyReaderState, UserPreferencesState, AppStatistics};
+use crate::custom_types::{ContextMenuState, DBConnPoolState, DBStat, DateLimit, Error, IgnoreAllowCacheState, Payload, SyncRunningState, TantivyBookmarkSearchResult, TantivyDocumentSearchResult, TantivyReaderState, TantivyWriterState, UserPreferencesState, AppStatistics};
 use crate::database::{establish_connection, get_connection_pool};
 use crate::database::models::{DocumentSearchResult, IgnoreList};
 use crate::database::search::{
@@ -24,7 +24,7 @@ use crate::context_menu::{contextmenu_receiver, searchresult_context_menu_folder
 // use log::info;
 use std::sync::Mutex;
 use std::process::Command;
-use crate::tantivy_index::{acquire_searcher_from_reader, create_tantivy_schema, delete_all_docs_from_index, get_reader_for_index, get_tantivy_index, parse_query_and_get_top_docs, return_bookmark_search_results, return_document_search_results};
+use crate::tantivy_index::{acquire_searcher_from_reader, delete_all_docs_from_index, get_reader_for_index, get_tantivy_index_cached, parse_query_and_get_top_docs, return_bookmark_search_results, return_document_search_results};
 use crate::tantivy_index::internal_test_create_csv_dump_from_index;
 use tauri::Emitter;
 
@@ -38,6 +38,16 @@ pub fn send_message_to_frontend(
     data: String,
 ) {
   window.emit(&event, Payload { message, data }).unwrap();
+}
+
+/// Refresh the cached allow/ignore lists from the database.
+/// Call this after any mutation to the ignore_list or allow_list tables.
+pub fn refresh_ignore_allow_cache(app: &tauri::AppHandle) {
+  let mut conn = establish_connection(app);
+  let new_cache = IgnoreAllowCacheState::from_db(&mut conn);
+  let state_mutex = app.state::<Mutex<IgnoreAllowCacheState>>();
+  let mut state = state_mutex.lock().unwrap();
+  *state = new_cache;
 }
 
 // Setup cron job for background sync
@@ -54,7 +64,7 @@ async fn setup_cron_job(window: tauri::WebviewWindow, app: tauri::AppHandle) {
       loop {
         interval.tick().await;
         let sync_running = sync_status(&app);
-        println!("??? Sync running: {}", sync_running.0);
+        log::debug!("??? Sync running: {}", sync_running.0);
         let current_timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
         if sync_running.0 == "false" && current_timestamp - sync_running.1 > 1800 {
           let window_clone = window.clone();
@@ -92,7 +102,7 @@ fn get_allowed_filetypes(app: tauri::AppHandle) -> Result<String, Error> {
 // Open a file (in default app) or a folder from the path
 #[tauri::command]
 fn open_file_or_folder(file_path: String, window: tauri::Window) -> Result<String, Error> {
-    println!(
+    log::info!(
         "Window {} invoked this command to open {}",
         window.label(),
         file_path
@@ -105,7 +115,7 @@ fn open_file_or_folder(file_path: String, window: tauri::Window) -> Result<Strin
 // Open the folder containing the file from the filepath
 #[tauri::command]
 fn open_folder_containing_file(file_path: String) -> Result<String, Error> {
-    println!("Opening folder for {}", file_path);
+    log::info!("Opening folder for {}", file_path);
     let do_steps = || -> Result<(), Error> {
         #[cfg(target_os = "windows")]
         {
@@ -149,7 +159,7 @@ async fn run_file_indexing(window: tauri::WebviewWindow, file_paths: Vec<String>
   // add app directory to ignore list
   let app_dir_path = get_app_directory();
   ignore_file_or_folder(app.clone(), app_dir_path, true, true).await;
-  println!("File watcher started");
+  log::info!("File watcher started");
   add_specific_folders(&window, file_paths, is_folder, app).await;
   Ok("File indexing complete".to_string())
 }
@@ -165,7 +175,8 @@ async fn run_file_sync(switch_off: bool, app: tauri::AppHandle, window: tauri::W
 async fn ignore_file_or_folder(app: tauri::AppHandle, path: String, is_directory: bool, should_ignore_indexing: bool) {
   let mut conn = establish_connection(&app);
   add_path_to_ignore_list(path, is_directory, should_ignore_indexing, &mut conn).unwrap();
-  remove_nonexistent_and_ignored_files(&mut conn);
+  refresh_ignore_allow_cache(&app);
+  remove_nonexistent_and_ignored_files(&mut conn, &app);
 }
 
 // Remove list of paths from Ignore List
@@ -173,6 +184,7 @@ async fn ignore_file_or_folder(app: tauri::AppHandle, path: String, is_directory
 async fn remove_from_ignore_list(app: tauri::AppHandle, paths: Vec<String>) {
   let mut conn = establish_connection(&app);
   let _ = remove_paths_from_ignore_list(paths, &mut conn);
+  refresh_ignore_allow_cache(&app);
 }
 
 // Ignore file or folder path
@@ -195,6 +207,12 @@ fn get_app_statistics(app: tauri::AppHandle) -> AppStatistics {
   crate::statistics::get_app_statistics(&app)
 }
 
+// Get the full set of statistics shown on the Dashboard home page.
+#[tauri::command]
+fn get_dashboard_stats(app: tauri::AppHandle) -> crate::custom_types::DashboardStats {
+  crate::dashboard::get_dashboard_stats(&app)
+}
+
 // Get search suggestions
 #[tauri::command]
 fn get_search_suggestions(query: String, app: tauri::AppHandle) -> Result<Vec<String>, Error> {
@@ -206,7 +224,7 @@ fn get_search_suggestions(query: String, app: tauri::AppHandle) -> Result<Vec<St
 // Run search
 #[tauri::command]
 fn run_search(query: String, page: i32, limit: i32, file_type: Option<String>, date_limit: Option<DateLimit>, app: tauri::AppHandle) -> Result<Vec<DocumentSearchResult>, Error> {
-    println!(
+    log::info!(
         "run_search: query: {}, page: {}, limit: {}, file_type: {:?}, date_limit: {:?}",
         query, page, limit, file_type, date_limit
     );
@@ -247,7 +265,7 @@ fn get_count_of_files_parsed(app: tauri::AppHandle) -> Result<i64, Error> {
 // Get parsed text for file
 #[tauri::command]
 async fn get_text_for_file(document_id: i32, app: tauri::AppHandle) -> Result<Vec<String>, Error> {
-    println!("Getting text for file ID: {}", document_id);
+    log::info!("Getting text for file ID: {}", document_id);
     let mut conn = establish_connection(&app);
     let text = get_parsed_text_for_file(document_id, &mut conn).unwrap();
     Ok(text)
@@ -276,7 +294,7 @@ async fn read_text_from_txt_file(file_path: String) -> Result<String, Error>  {
 // Open QuickLook (MacOS) or Peek (Windows)
 #[tauri::command]
 fn open_quicklook(file_path: String) -> Result<String, Error> {
-    println!("Opening QuickLook for {}", file_path);
+    log::info!("Opening QuickLook for {}", file_path);
 
     #[cfg(target_os = "macos")]
     std::thread::spawn(move || {
@@ -324,7 +342,7 @@ fn open_context_menu(app_handle: tauri::AppHandle, window: tauri::Window, option
         let context_menu = &state.table_header;
         window.popup_menu(context_menu).unwrap();
       },
-      _ => println!("Invalid context menu option"),
+      _ => log::warn!("Invalid context menu option"),
   }
 }
 
@@ -350,7 +368,7 @@ async fn reset_user_preferences(app_handle: tauri::AppHandle) {
 
 #[tauri::command]
 async fn set_user_preference(window: tauri::WebviewWindow, app_handle: tauri::AppHandle, key: String, value: bool) {
-  println!("Setting {} to {}", key, value);
+  log::info!("Setting {} to {}", key, value);
   let mut conn = establish_connection(&app_handle);
   match key.as_str() {
     "launch_at_startup" => {
@@ -398,7 +416,7 @@ async fn set_user_preference(window: tauri::WebviewWindow, app_handle: tauri::Ap
       graceful_restart(app_handle, &mut conn, 30);
     }
     _ => {
-      println!("Invalid key");
+      log::warn!("Invalid key");
     } 
   }
 }
@@ -406,7 +424,7 @@ async fn set_user_preference(window: tauri::WebviewWindow, app_handle: tauri::Ap
 // Set the maximum number of pages to OCR for scanned PDFs
 #[tauri::command]
 fn set_pdf_max_ocr_pages(app_handle: tauri::AppHandle, pages: i64) {
-  println!("Setting pdf max OCR pages to {}", pages);
+  log::info!("Setting pdf max OCR pages to {}", pages);
   let pages = pages.clamp(1, 5000);
   set_pdf_max_ocr_pages_in_db(pages, &app_handle);
   set_user_preferences_state_from_db_value(&app_handle);
@@ -415,7 +433,7 @@ fn set_pdf_max_ocr_pages(app_handle: tauri::AppHandle, pages: i64) {
 // Set new global shortcut in DB and update the global shortcut
 #[tauri::command]
 async fn set_new_global_shortcut(app_handle: tauri::AppHandle, new_shortcut_string: String) {
-  println!("Setting new global shortcut: {}", new_shortcut_string);
+  log::info!("Setting new global shortcut: {}", new_shortcut_string);
   let new_shortcut_string = fix_global_shortcut_string(new_shortcut_string);
   let mut conn = establish_connection(&app_handle);
   set_new_global_shortcut_in_db(new_shortcut_string, &app_handle);
@@ -428,8 +446,8 @@ async fn set_new_global_shortcut(app_handle: tauri::AppHandle, new_shortcut_stri
 
 #[tauri::command]
 fn search_tantivy_files_index(app_handle: tauri::AppHandle, user_query: String, limit: i32, page: i32) -> Result<Vec<TantivyDocumentSearchResult>, Error> {
-  println!("Searching Tantivy index...");
-  let tantivy_index = get_tantivy_index(create_tantivy_schema()).unwrap();
+  log::info!("Searching Tantivy index...");
+  let tantivy_index = get_tantivy_index_cached().unwrap();
   let searcher = acquire_searcher_from_reader(&app_handle).unwrap();
 
   let top_docs = parse_query_and_get_top_docs(&tantivy_index, &searcher, user_query, limit, page*limit).unwrap();
@@ -440,8 +458,8 @@ fn search_tantivy_files_index(app_handle: tauri::AppHandle, user_query: String, 
 
 #[tauri::command]
 fn search_tantivy_bookmarks_index(app_handle: tauri::AppHandle, user_query: String, limit: i32, page: i32) -> Result<Vec<TantivyBookmarkSearchResult>, Error> {
-  println!("Searching Tantivy index...");
-  let tantivy_index = get_tantivy_index(create_tantivy_schema()).unwrap();
+  log::info!("Searching Tantivy index...");
+  let tantivy_index = get_tantivy_index_cached().unwrap();
   let searcher = acquire_searcher_from_reader(&app_handle).unwrap();
 
   let top_docs = parse_query_and_get_top_docs(&tantivy_index, &searcher, user_query, limit, page*limit).unwrap();
@@ -459,7 +477,7 @@ fn create_csv_dump(app_handle: tauri::AppHandle) {
 fn clear_index(app_handle: tauri::AppHandle) {
   let mut conn = establish_connection(&app_handle);
   // delete the tantivy index
-  let _ = delete_all_docs_from_index();
+  let _ = delete_all_docs_from_index(&app_handle);
   // clear last_parsed timestamps from the database
   clear_last_parsed_dates_from_db(&mut conn);
 }
@@ -470,7 +488,7 @@ fn clear_index(app_handle: tauri::AppHandle) {
 async fn rescan_documents(rescan_all: bool, window: tauri::WebviewWindow, app: tauri::AppHandle) {
   if rescan_all {
     let mut conn = establish_connection(&app);
-    let _ = delete_all_docs_from_index();
+    let _ = delete_all_docs_from_index(&app);
     clear_last_parsed_dates_from_db(&mut conn);
   }
   run_sync_operation(window, app, false, Vec::new()).await;
@@ -507,6 +525,7 @@ pub fn initialize() {
       run_file_sync,
       get_sync_status,
       get_app_statistics,
+      get_dashboard_stats,
       get_search_suggestions,
       run_search,
       get_recent_docs,
@@ -548,14 +567,23 @@ pub fn initialize() {
           let pool = get_connection_pool();
           handle.manage(Mutex::new(DBConnPoolState::new(pool)));
           // tantivy reader state
-          let tantivy_index = get_tantivy_index(create_tantivy_schema()).unwrap();
+          let tantivy_index = get_tantivy_index_cached().unwrap();
           let given_reader = get_reader_for_index(&tantivy_index).unwrap();
           handle.manage(Mutex::new(TantivyReaderState::new(given_reader)));
+          // tantivy writer state (singleton — avoids reopening on every write)
+          let tantivy_writer = tantivy_index.writer(150_000_000).expect("Failed to create Tantivy IndexWriter");
+          handle.manage(Mutex::new(TantivyWriterState::new(tantivy_writer)));
           // user preferences state
           handle.manage(Mutex::new(UserPreferencesState::default()));
           set_user_preferences_state_from_db_value(app.handle());
           // sync running state
           handle.manage(Mutex::new(SyncRunningState::default()));
+          // ignore/allow list cache — loaded once at startup, refreshed after list changes
+          {
+            let mut direct_conn = crate::database::establish_direct_connection_to_db();
+            let ignore_allow_cache = IgnoreAllowCacheState::from_db(&mut direct_conn);
+            handle.manage(Mutex::new(ignore_allow_cache));
+          }
           // context menu
           let main_window = handle.get_webview_window("main").unwrap();
           let folder_context_menu = searchresult_context_menu_folder(&main_window);
@@ -567,7 +595,7 @@ pub fn initialize() {
         }
         {
           if is_global_shortcut_enabled(app.handle()) {
-            println!("Global Shortcut is enabled");
+            log::info!("Global Shortcut is enabled");
             use tauri_plugin_global_shortcut::{Builder, ShortcutState};
             // Registration of the global shortcut is best-effort: the hotkey may
             // already be claimed by the OS or another application (e.g. Alt+Space).
@@ -578,9 +606,9 @@ pub fn initialize() {
                 .with_handler(|app_handle, shortcut, event| {
                   if event.state == ShortcutState::Pressed {
                     let (global_shortcut_modifiers, global_shortcut_code) = get_modifiers_and_code_from_global_shortcut(app_handle);
-                    println!("shortcut: {:?}", shortcut);
+                    log::debug!("shortcut: {:?}", shortcut);
                     if shortcut.matches(global_shortcut_modifiers, global_shortcut_code) {
-                      println!("Global Shortcut Detected!");
+                      log::info!("Global Shortcut Detected!");
                       let main_window = app_handle.get_webview_window("main").unwrap();
                       hide_or_show_window(main_window);
                     }
@@ -591,10 +619,10 @@ pub fn initialize() {
               Ok(())
             })();
             if let Err(error) = registration {
-              println!("Failed to register the global shortcut ({}); continuing without it.", error);
+              log::error!("Failed to register the global shortcut ({}); continuing without it.", error);
             }
           } else {
-            println!("Global Shortcut is disabled");
+            log::info!("Global Shortcut is disabled");
           }
         }
         {

@@ -81,7 +81,7 @@ pub fn contextmenu_receiver(app: &tauri::AppHandle, event: MenuEvent) {
     "last_modified_toggle" => {
       app.emit("toggle-last-modified", Payload { message: "Toggle Last Modified/Opened".into(), data: "".into() }).unwrap();
     }
-    _ => println!("Invalid context menu option"),
+    _ => log::warn!("Invalid context menu option"),
   }
 }
 
