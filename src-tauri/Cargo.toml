@@ -57,7 +57,7 @@ open = "5.1.1"
 dirs = "5.0.1"
 diesel = { version = "2.1.4", features = ["sqlite", "r2d2", "chrono", "time"] }
 chrono = "0.4.26"
-jwalk = "0.8.1"
+ignore = "0.4"
 dotext = "0.1.1"
 log = "0.4.21"
 log4rs = "1.3"
