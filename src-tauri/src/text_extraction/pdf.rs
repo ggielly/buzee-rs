@@ -82,20 +82,26 @@ pub async fn extract(file: &String, _app: &tauri::AppHandle) -> Result<String, B
 
       let mut conn = establish_connection(_app);
 
-      // Check the OCR cache before running expensive recognition.
+      // Check the whole-file OCR cache before running expensive recognition.
+      // This fast path returns when the file is byte-for-byte unchanged since
+      // the last successful run.
       let file_hash = ocr_cache::compute_file_hash(std::path::Path::new(file))
         .unwrap_or_default();
       if let Some(cached) = ocr_cache::get_cached_ocr(&file_hash, &mut conn) {
         return Ok(cached);
       }
 
+      // Load the per-page cache for this document. Pages whose raster still
+      // matches a stored page hash will not be re-OCR-ed.
+      let cached_pages = ocr_cache::get_cached_pdf_pages(file, &mut conn);
+
       let path_buf = std::path::PathBuf::from(file);
       let max_pages = get_pdf_max_ocr_pages(_app) as u32;
-      let result = tokio::time::timeout(
+      let pages = tokio::time::timeout(
         std::time::Duration::from_secs(PDF_OCR_TIMEOUT_SECS),
         tokio::task::spawn_blocking(move || {
           let ocr_engine = win_ocr::WindowsOcr;
-          ocr_engine.recognize_pdf(&path_buf, None, max_pages)
+          ocr_engine.recognize_pdf(&path_buf, None, max_pages, &cached_pages)
         }),
       )
       .await
@@ -105,20 +111,30 @@ pub async fn extract(file: &String, _app: &tauri::AppHandle) -> Result<String, B
       })?
       .map_err(|error| Box::new(error) as Box<dyn Error>)??;
 
-      if result.text.trim().is_empty() {
+      let text = pages
+        .iter()
+        .map(|page| page.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+      let text = win_ocr::normalize_ocr_text(&text);
+
+      if text.trim().is_empty() {
         return Err("OcrUnavailableForPdf".into());
       }
 
-      // Store the result in the OCR cache for subsequent runs.
+      // Persist the fresh per-page results (reused pages carry their stored hash
+      // and text, so unchanged pages stay cached) and update the whole-file
+      // cache.
+      ocr_cache::store_cached_pdf_pages(file, &pages, &mut conn);
       ocr_cache::store_ocr_result(
         &file_hash,
-        &result.text,
-        result.lines_detected as i32,
-        result.language_tag.as_deref(),
+        &text,
+        pages.len() as i32,
+        None,
         &mut conn,
       );
 
-      return Ok(result.text)
+      return Ok(text)
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]

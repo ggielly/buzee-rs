@@ -337,6 +337,22 @@ pub const OCR_CACHE_TABLE_CREATE_STATEMENT : &str = r#"
   );
 "#;
 
+// OCR_PAGE_CACHE stores per-page OCR results keyed by (file path, page index).
+// Each row remembers the SHA-256 hash of the rasterized page so that a re-scan
+// re-OCRs only pages whose raster changed, skipping the (expensive) OCR of
+// unchanged pages in large documents.
+pub const OCR_PAGE_CACHE_TABLE_CREATE_STATEMENT : &str = r#"
+  CREATE TABLE IF NOT EXISTS "ocr_page_cache"
+  (
+    file_path TEXT NOT NULL,
+    page_index INTEGER NOT NULL,
+    page_raster_hash TEXT NOT NULL,
+    page_text TEXT NOT NULL,
+    created_at BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (file_path, page_index)
+  );
+"#;
+
 ////////////////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////
 //////////////////////////////////////// OTHER DOMAINS /////////////////////////////////////////

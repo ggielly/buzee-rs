@@ -3,6 +3,8 @@ use std::path::Path;
 
 use diesel::prelude::*;
 
+use crate::text_extraction::win_ocr::{CachedPdfPage, PdfPageOcr};
+
 /// Returns cached OCR text for a file whose identity matches `file_hash`.
 /// Returns `None` when there is no cache hit.
 pub fn get_cached_ocr(file_hash: &str, conn: &mut diesel::SqliteConnection) -> Option<String> {
@@ -19,6 +21,64 @@ pub fn get_cached_ocr(file_hash: &str, conn: &mut diesel::SqliteConnection) -> O
 struct OcrCacheRow {
     #[diesel(sql_type = diesel::sql_types::Text)]
     text: String,
+}
+
+/// Returns the previously stored per-page OCR entries for a document path.
+pub fn get_cached_pdf_pages(
+    file_path: &str,
+    conn: &mut diesel::SqliteConnection,
+) -> Vec<CachedPdfPage> {
+    diesel::sql_query(
+        "SELECT page_index, page_raster_hash, page_text FROM ocr_page_cache WHERE file_path = ?1"
+            .to_string(),
+    )
+    .bind::<diesel::sql_types::Text, _>(file_path)
+    .load::<OcrPageRow>(conn)
+    .unwrap_or_default()
+    .into_iter()
+    .map(|row| CachedPdfPage {
+        index: row.page_index as u32,
+        raster_hash: row.page_raster_hash,
+        text: row.page_text,
+    })
+    .collect()
+}
+
+#[derive(QueryableByName)]
+struct OcrPageRow {
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    page_index: i32,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    page_raster_hash: String,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    page_text: String,
+}
+
+/// Replaces the per-page OCR cache rows for a document path with `pages`.
+pub fn store_cached_pdf_pages(
+    file_path: &str,
+    pages: &[PdfPageOcr],
+    conn: &mut diesel::SqliteConnection,
+) {
+    // Remove stale rows (e.g. page count shrank) then insert the fresh ones.
+    diesel::sql_query("DELETE FROM ocr_page_cache WHERE file_path = ?1".to_string())
+        .bind::<diesel::sql_types::Text, _>(file_path)
+        .execute(conn)
+        .ok();
+
+    let timestamp = chrono::Utc::now().timestamp();
+    for page in pages {
+        let _ = diesel::sql_query(
+            "INSERT INTO ocr_page_cache (file_path, page_index, page_raster_hash, page_text, created_at) VALUES (?1, ?2, ?3, ?4, ?5)"
+                .to_string(),
+        )
+        .bind::<diesel::sql_types::Text, _>(file_path)
+        .bind::<diesel::sql_types::Integer, _>(page.index as i32)
+        .bind::<diesel::sql_types::Text, _>(&page.raster_hash)
+        .bind::<diesel::sql_types::Text, _>(&page.text)
+        .bind::<diesel::sql_types::BigInt, _>(timestamp)
+        .execute(conn);
+    }
 }
 
 /// Stores a successful OCR result in the cache.

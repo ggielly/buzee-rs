@@ -49,6 +49,26 @@ pub struct OcrResult {
   pub lines_detected: usize,
 }
 
+/// Per-page OCR result. Carries the SHA-256 of the rasterized page so callers
+/// can persist it and, on a later scan, skip OCR for pages whose raster did not
+/// change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PdfPageOcr {
+  pub index: u32,
+  pub raster_hash: String,
+  pub text: String,
+}
+
+/// A previously stored page OCR entry, to be compared against the freshly
+/// rasterized hash. When [PdfPageOcr] shares the same hash plus index, the
+/// cached text is reused and recognition is skipped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachedPdfPage {
+  pub index: u32,
+  pub raster_hash: String,
+  pub text: String,
+}
+
 pub trait ImageOcr {
   fn recognize_image(
     &self,
@@ -56,12 +76,16 @@ pub trait ImageOcr {
     preferred_language: Option<&str>,
   ) -> Result<OcrResult, OcrError>;
 
+  /// OCRs `max_pages` of a PDF, reusing `cached_pages` where the rasterized page
+  /// hash matches the stored one. Returns the fresh per-page results (cached
+  /// text reused as-is) so the caller can update its page cache.
   fn recognize_pdf(
     &self,
     path: &Path,
     preferred_language: Option<&str>,
     max_pages: u32,
-  ) -> Result<OcrResult, OcrError>;
+    cached_pages: &[CachedPdfPage],
+  ) -> Result<Vec<PdfPageOcr>, OcrError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -145,8 +169,9 @@ impl ImageOcr for WindowsOcr {
     path: &Path,
     preferred_language: Option<&str>,
     max_pages: u32,
-  ) -> Result<OcrResult, OcrError> {
-    windows_ocr::recognize_pdf(path, preferred_language, max_pages)
+    cached_pages: &[CachedPdfPage],
+  ) -> Result<Vec<PdfPageOcr>, OcrError> {
+    windows_ocr::recognize_pdf(path, preferred_language, max_pages, cached_pages)
   }
 }
 
@@ -170,22 +195,23 @@ impl ImageOcr for WindowsOcr {
     _path: &Path,
     _preferred_language: Option<&str>,
     _max_pages: u32,
-  ) -> Result<OcrResult, OcrError> {
+    _cached_pages: &[CachedPdfPage],
+  ) -> Result<Vec<PdfPageOcr>, OcrError> {
     Err(OcrError::EngineUnavailable)
   }
 }
 
 #[cfg(target_os = "windows")]
 mod windows_ocr {
-  use super::{OcrError, OcrResult};
+  use super::{CachedPdfPage, OcrError, OcrResult, PdfPageOcr};
   use std::path::Path;
   use windows::core::{HSTRING, Interface};
   use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
-  use windows::Data::Pdf::{PdfDocument, PdfPage};
+  use windows::Data::Pdf::{PdfDocument, PdfPage, PdfPageRenderOptions};
   use windows::Globalization::Language;
   use windows::Graphics::Imaging::{BitmapDecoder, BitmapPixelFormat, SoftwareBitmap};
   use windows::Media::Ocr::OcrEngine;
-  use windows::Storage::Streams::{InMemoryRandomAccessStream, IRandomAccessStream};
+  use windows::Storage::Streams::{DataReader, InMemoryRandomAccessStream, IRandomAccessStream};
   use windows::Storage::{FileAccessMode, StorageFile};
 
   fn win_err(error: windows::core::Error) -> OcrError {
@@ -293,7 +319,36 @@ mod windows_ocr {
     })
   }
 
-  pub fn recognize_pdf(path: &Path, preferred_language: Option<&str>, max_pages: u32) -> Result<OcrResult, OcrError> {
+  // Computes the SHA-256 of a rendered page's bytes (reads the stream, then
+  // restores its position). This is the per-page change fingerprint.
+  fn raster_hash(stream: &IRandomAccessStream) -> Result<(String, u64), OcrError> {
+    use sha2::{Digest, Sha256};
+
+    let size = stream.Size().map_err(win_err)?;
+    stream.Seek(0).map_err(win_err)?;
+    let input = stream.GetInputStreamAt(0).map_err(win_err)?;
+    let reader = DataReader::CreateDataReader(&input).map_err(win_err)?;
+    let loaded = reader
+      .LoadAsync(size as u32)
+      .map_err(win_err)?
+      .get()
+      .map_err(win_err)? as usize;
+
+    let mut buffer = vec![0u8; loaded];
+    reader.ReadBytes(&mut buffer).map_err(win_err)?;
+    stream.Seek(0).map_err(win_err)?; // restore for the decoder
+
+    let mut hasher = Sha256::new();
+    hasher.update(&buffer);
+    Ok((format!("{:x}", hasher.finalize()), size))
+  }
+
+  pub fn recognize_pdf(
+    path: &Path,
+    preferred_language: Option<&str>,
+    max_pages: u32,
+    cached_pages: &[CachedPdfPage],
+  ) -> Result<Vec<PdfPageOcr>, OcrError> {
     let _guard = MtaGuard::init()?;
     let stream = open_readable_stream(path)?;
 
@@ -313,19 +368,21 @@ mod windows_ocr {
       );
     }
 
+    // Index the cached pages for cheap per-page lookup.
+    let mut cached_by_index = std::collections::HashMap::with_capacity(cached_pages.len());
+    for page in cached_pages {
+      cached_by_index.insert(page.index, page);
+    }
+
     // Small PDFs: sequential (avoids spawn overhead).
     let engine = select_engine(preferred_language)?;
     if pages_to_ocr <= 3 {
-      let mut page_texts = Vec::with_capacity(pages_to_ocr as usize);
-      let mut lines_detected = 0usize;
+      let mut results = Vec::with_capacity(pages_to_ocr as usize);
       let mut first_error: Option<OcrError> = None;
 
       for index in 0..pages_to_ocr {
-        match ocr_page(&document, &engine, index) {
-          Ok((text, count)) => {
-            page_texts.push(text);
-            lines_detected += count;
-          }
+        match ocr_page(&document, &engine, index, &cached_by_index) {
+          Ok(page) => results.push(page),
           Err(error) => {
             log::warn!("OCR failed for page {} of {}: {}", index + 1, path.display(), error);
             if first_error.is_none() {
@@ -335,15 +392,11 @@ mod windows_ocr {
         }
       }
 
-      if page_texts.is_empty() {
+      if results.is_empty() {
         return Err(first_error.unwrap_or(OcrError::DecodeFailed));
       }
 
-      return Ok(OcrResult {
-        text: super::normalize_ocr_text(&page_texts.join("\n\n")),
-        language_tag: engine_language_tag(&engine),
-        lines_detected,
-      });
+      return Ok(results);
     }
 
     // Large PDFs: parallel OCR across pages, in batches.
@@ -352,7 +405,7 @@ mod windows_ocr {
     // caps how many batches (and thus how many threads) run at once, and
     // futures::join_all waits for all results. Page order is preserved because
     // results are collected in the order the batches were spawned.
-    recognize_pdf_parallel(path, preferred_language, pages_to_ocr)
+    recognize_pdf_parallel(path, preferred_language, pages_to_ocr, &cached_by_index)
   }
 
   // Maximum number of PDF pages to OCR concurrently. Each parallel task loads
@@ -361,13 +414,20 @@ mod windows_ocr {
 
   // OCRs `pages_to_ocr` PDF pages in small batches, each batch run on its own
   // blocking-pool thread through `join_all`.
-  fn recognize_pdf_parallel(path: &Path, preferred_language: Option<&str>, pages_to_ocr: u32) -> Result<OcrResult, OcrError> {
+  fn recognize_pdf_parallel(
+    path: &Path,
+    preferred_language: Option<&str>,
+    pages_to_ocr: u32,
+    cached_by_index: &std::collections::HashMap<u32, &CachedPdfPage>,
+  ) -> Result<Vec<PdfPageOcr>, OcrError> {
     use futures::future::join_all;
     use tokio::sync::Semaphore;
 
     let semaphore = std::sync::Arc::new(Semaphore::new(MAX_PARALLEL_OCR_PAGES));
     let preferred = preferred_language.map(|s| s.to_string());
     let path_owned = path.to_path_buf();
+    // Snapshot the cached pages (owned) so each batch can look them up safely.
+    let cached_snapshot: Vec<CachedPdfPage> = cached_by_index.values().map(|c| (*c).clone()).collect();
     let rt = tokio::runtime::Handle::current();
 
     // Group pages into contiguous batches. Smaller PDFs get a single batch that
@@ -384,7 +444,7 @@ mod windows_ocr {
     // Spawn one blocking task per batch. The permit is acquired here (before
     // spawning) so we never hold more than a bounded number of concurrent OCR
     // tasks, keeping the blocking pool from being saturated.
-    let mut handles: Vec<tokio::task::JoinHandle<Result<(String, usize), OcrError>>> =
+    let mut handles: Vec<tokio::task::JoinHandle<Result<Vec<PdfPageOcr>, OcrError>>> =
       Vec::with_capacity(batch_count as usize);
 
     for (start, end) in batches {
@@ -393,28 +453,25 @@ mod windows_ocr {
         .map_err(|_| OcrError::WindowsApi("OCR semaphore closed".into()))?;
       let pref = preferred.clone();
       let p = path_owned.clone();
+      let cached = cached_snapshot.clone();
 
       handles.push(tokio::task::spawn_blocking(move || {
         let _permit = permit; // held until the batch completes
-        ocr_page_batch_task(&p, pref.as_deref(), start, end)
+        ocr_page_batch_task(&p, pref.as_deref(), start, end, &cached)
       }));
     }
 
     // We are on a blocking pool thread (caller wrapped us in spawn_blocking), so
     // blocking on join_all is safe and expected; it waits for every batch.
-    let batch_results: Vec<Result<Result<(String, usize), OcrError>, tokio::task::JoinError>> =
+    let batch_results: Vec<Result<Result<Vec<PdfPageOcr>, OcrError>, tokio::task::JoinError>> =
       rt.block_on(join_all(handles));
 
-    let mut page_texts = Vec::with_capacity(pages_to_ocr as usize);
-    let mut lines_detected = 0usize;
+    let mut all_results = Vec::with_capacity(pages_to_ocr as usize);
     let mut first_error: Option<OcrError> = None;
 
     for result in batch_results {
       match result {
-        Ok(Ok((text, count))) => {
-          page_texts.push(text);
-          lines_detected += count;
-        }
+        Ok(Ok(pages)) => all_results.extend(pages),
         Ok(Err(error)) => {
           log::warn!("OCR batch failed for {}: {}", path.display(), error);
           if first_error.is_none() {
@@ -430,15 +487,11 @@ mod windows_ocr {
       }
     }
 
-    if page_texts.is_empty() {
+    if all_results.is_empty() {
       return Err(first_error.unwrap_or(OcrError::DecodeFailed));
     }
 
-    Ok(OcrResult {
-      text: super::normalize_ocr_text(&page_texts.join("\n\n")),
-      language_tag: None, // per-page engine; language already logged
-      lines_detected,
-    })
+    Ok(all_results)
   }
 
   // OCRs a contiguous page range [start, end) sequentially on the calling
@@ -449,7 +502,8 @@ mod windows_ocr {
     preferred_language: Option<&str>,
     start: u32,
     end: u32,
-  ) -> Result<(String, usize), OcrError> {
+    cached_pages: &[CachedPdfPage],
+  ) -> Result<Vec<PdfPageOcr>, OcrError> {
     let _guard = MtaGuard::init()?;
     let stream = open_readable_stream(path)?;
     let document = PdfDocument::LoadFromStreamAsync(&stream)
@@ -458,16 +512,17 @@ mod windows_ocr {
       .map_err(win_err)?;
     let engine = select_engine(preferred_language)?;
 
-    let mut page_texts = Vec::with_capacity((end - start) as usize);
-    let mut lines_detected = 0usize;
+    let mut cached_by_index = std::collections::HashMap::with_capacity(cached_pages.len());
+    for page in cached_pages {
+      cached_by_index.insert(page.index, page);
+    }
+
+    let mut results = Vec::with_capacity((end - start) as usize);
     let mut first_error: Option<OcrError> = None;
 
     for index in start..end {
-      match ocr_page(&document, &engine, index) {
-        Ok((text, count)) => {
-          page_texts.push(text);
-          lines_detected += count;
-        }
+      match ocr_page(&document, &engine, index, &cached_by_index) {
+        Ok(page) => results.push(page),
         Err(error) => {
           log::warn!("OCR failed for page {} of {}: {}", index + 1, path.display(), error);
           if first_error.is_none() {
@@ -477,27 +532,87 @@ mod windows_ocr {
       }
     }
 
-    if page_texts.is_empty() {
+    if results.is_empty() {
       return Err(first_error.unwrap_or(OcrError::DecodeFailed));
     }
 
-    Ok((page_texts.join("\n\n"), lines_detected))
+    Ok(results)
   }
 
-  // Rasterizes a single PDF page into a bitmap and OCRs it.
-  fn ocr_page(document: &PdfDocument, engine: &OcrEngine, index: u32) -> Result<(String, usize), OcrError> {
+  // Preferred OCR render resolution. Windows.Media.Ocr caps the longest image
+  // side at OcrEngine.MaxImageDimension (2600 px on current builds), so pages
+  // are rasterized at this DPI, clamped so the longest side never exceeds the
+  // engine limit (≈220 DPI for A4 portrait).
+  const OCR_RENDER_DPI: f32 = 300.0;
+
+  // Builds the render options that rasterize `page` at the highest useful DPI
+  // whose longest side still fits within OcrEngine.MaxImageDimension, so the
+  // OCR engine never rejects the bitmap. PdfPage::Size is expressed in DIPs
+  // (1/96 in), from which the physical size in inches is derived.
+  fn ocr_render_options(page: &PdfPage) -> Result<PdfPageRenderOptions, OcrError> {
+    let size = page.Size().map_err(win_err)?;
+    // Target pixel size at OCR_RENDER_DPI.
+    let scale = OCR_RENDER_DPI / 96.0;
+    let target_width = size.Width * scale;
+    let target_height = size.Height * scale;
+
+    // Clamp so the longest side never exceeds the OCR engine's limit.
+    let max_dimension = OcrEngine::MaxImageDimension().map_err(win_err)? as f32;
+    let fit = (max_dimension / target_width.max(target_height)).min(1.0);
+
+    let options = PdfPageRenderOptions::new().map_err(win_err)?;
+    options
+      .SetDestinationWidth((target_width * fit) as u32)
+      .map_err(win_err)?;
+    options
+      .SetDestinationHeight((target_height * fit) as u32)
+      .map_err(win_err)?;
+    // Render the page with its original colors instead of the user's
+    // high-contrast theme, which can distort text and hurt recognition.
+    options.SetIsIgnoringHighContrast(true).map_err(win_err)?;
+    Ok(options)
+  }
+
+  // Rasterizes a single PDF page into a bitmap and OCRs it, unless the page's
+  // raster hash matches a cached page (in which case the cached text is reused
+  // and recognition is skipped entirely).
+  fn ocr_page(
+    document: &PdfDocument,
+    engine: &OcrEngine,
+    index: u32,
+    cached_by_index: &std::collections::HashMap<u32, &CachedPdfPage>,
+  ) -> Result<PdfPageOcr, OcrError> {
     let page: PdfPage = document.GetPage(index).map_err(win_err)?;
+    let options = ocr_render_options(&page)?;
     let output = InMemoryRandomAccessStream::new().map_err(win_err)?;
     page
-      .RenderToStreamAsync(&output)
+      .RenderWithOptionsToStreamAsync(&output, &options)
       .map_err(win_err)?
       .get()
       .map_err(win_err)?;
-    output.Seek(0).map_err(win_err)?;
 
     let stream = output.cast::<IRandomAccessStream>().map_err(win_err)?;
+    let (raster_hash_vec, _size) = raster_hash(&stream)?;
+
+    // Reuse cached text when the raster is unchanged.
+    if let Some(cached) = cached_by_index.get(&index) {
+      if cached.raster_hash.eq_ignore_ascii_case(&raster_hash_vec) {
+        return Ok(PdfPageOcr {
+          index,
+          raster_hash: raster_hash_vec.clone(),
+          text: cached.text.clone(),
+        });
+      }
+    }
+
     let bitmap = to_bgra8(&stream)?;
-    recognize_bitmap(engine, &bitmap)
+    let (_text, _count) = recognize_bitmap(engine, &bitmap)?;
+
+    Ok(PdfPageOcr {
+      index,
+      raster_hash: raster_hash_vec,
+      text: super::normalize_ocr_text(&_text),
+    })
   }
 
   fn engine_language_tag(engine: &OcrEngine) -> Option<String> {
