@@ -150,38 +150,47 @@ pub fn search_fts_index(
     let query_segments: QuerySegments = parse_stringified_query_segments(&query);
     log::debug!("query_segments: {:?}", query_segments);
 
-    let file_type_clone = file_type.clone();
-
-    let date_limit_clone = date_limit.clone();
     let mut search_results: Vec<DocumentSearchResult>;
     // if there is only a NOT query, pass it to `handle_special_case` function
     if query_segments.quoted_segments.is_empty() && query_segments.greedy_segments.is_empty() && !query_segments.not_segments.is_empty() {
-      search_results = handle_special_case(query, page, limit, file_type_clone, conn).unwrap();
+      search_results = handle_special_case(query, page, limit, file_type, conn)?;
     }
     // otherwise run the Tantivy search query
     else {
-      let tantivy_string = create_tantivy_query_statement(&query_segments, file_type_clone.unwrap_or("".to_string()));
+      let tantivy_string = create_tantivy_query_statement(&query_segments, file_type.unwrap_or("".to_string()));
       log::debug!("tantivy_string: {}", tantivy_string);
 
-      let tantivy_index = get_tantivy_index(create_tantivy_schema()).unwrap();
-      let searcher = acquire_searcher_from_reader(&app).unwrap();
-      let new_conn = establish_connection(&app);
-      search_results = get_search_results_from_tantivy_index(&tantivy_string, limit, page, &searcher, &tantivy_index, new_conn).unwrap_or(Vec::new());
+      match get_tantivy_index(create_tantivy_schema()) {
+        Ok(tantivy_index) => {
+          match acquire_searcher_from_reader(&app) {
+            Ok(searcher) => {
+              let new_conn = establish_connection(&app);
+              search_results = get_search_results_from_tantivy_index(&tantivy_string, limit, page, &searcher, &tantivy_index, new_conn).unwrap_or(Vec::new());
+            }
+            Err(e) => {
+              log::error!("Failed to acquire tantivy searcher: {}", e);
+              search_results = Vec::new();
+            }
+          }
+        }
+        Err(e) => {
+          log::error!("Failed to open tantivy index: {}", e);
+          search_results = Vec::new();
+        }
+      }
     }
     // and order them by last_modified
     // TODO: change this to frecency rank
     search_results.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
     // remove duplicates by checking if the id is the same
     search_results.dedup_by(|a, b| a.id == b.id);
-    if search_results.len() > 0 && date_limit_clone.is_some() {
-      let start_date = date_limit_clone.clone().unwrap().start.parse::<i64>().unwrap_or(0);
-      let end_date = date_limit_clone.clone().unwrap().end.parse::<i64>().unwrap_or(0);
+    if let Some(date_limit) = date_limit {
+      let start_date = date_limit.start.parse::<i64>().unwrap_or(0);
+      let end_date = date_limit.end.parse::<i64>().unwrap_or(0);
       if start_date > 0 || end_date > 0 {
         // remove results that don't match the date limit
         search_results.retain(|result| {
-          let last_modified = result.last_modified;
-          let date_limit = date_limit_clone.clone().unwrap();
-          last_modified >= date_limit.start.parse::<i64>().unwrap() && last_modified <= date_limit.end.parse::<i64>().unwrap()
+          result.last_modified >= start_date && result.last_modified <= end_date
         });
       }
     }
@@ -264,21 +273,34 @@ pub fn get_recently_opened_docs(
 pub fn get_counts_for_all_filetypes(
     mut conn: PooledConnection<ConnectionManager<SqliteConnection>>,
 ) -> Result<Vec<DBStat>, diesel::result::Error> {
-    // couldn't get COUNT -- GROUP BY to work so doing it manually for each filetype
-    use crate::database::schema::document::dsl::*;
+    #[derive(diesel::QueryableByName)]
+    struct FileTypeCount {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        file_type: String,
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        count: i64,
+    }
+
+    // A single GROUP BY query replaces the previous per-filetype COUNT loop.
+    let counts: Vec<FileTypeCount> = diesel::sql_query(
+        "SELECT file_type, COUNT(*) AS count FROM document GROUP BY file_type",
+    )
+    .load(&mut conn)?;
+
+    let counts_by_type: std::collections::HashMap<String, i64> = counts
+        .into_iter()
+        .map(|row| (row.file_type, row.count))
+        .collect();
+
     let all_filetypes = all_allowed_filetypes(&mut conn, true);
-    let mut counts: Vec<DBStat> = Vec::new();
+    let mut stats: Vec<DBStat> = Vec::with_capacity(all_filetypes.len());
     for doctype in all_filetypes {
-        let count = document
-            .filter(file_type.eq(&doctype.file_type))
-            .count()
-            .get_result(&mut conn)?;
-        counts.push(DBStat {
-            file_type: doctype.file_type,
-            count: count,
+        stats.push(DBStat {
+            file_type: doctype.file_type.clone(),
+            count: counts_by_type.get(&doctype.file_type).copied().unwrap_or(0),
         });
     }
-    Ok(counts)
+    Ok(stats)
 }
 
 // Get total number of documents in the database (all indexed files).
@@ -311,7 +333,7 @@ fn handle_special_case(
 ) -> Result<Vec<DocumentSearchResult>, diesel::result::Error> {
     let query_segments: QuerySegments = parse_stringified_query_segments(&query);
     log::debug!("query_segments: {:?}", query_segments);
-    let outer_search_results = get_recently_opened_docs(page, limit*2, file_type, conn).unwrap();
+    let outer_search_results = get_recently_opened_docs(page, limit*2, file_type, conn)?;
     let mut search_results: Vec<DocumentSearchResult> = Vec::new();
     // iterate over outer_search_results and remove any item where item.name or item.path contains any of query_segments.not_segments
     for result in outer_search_results {
@@ -380,8 +402,7 @@ pub fn get_parsed_text_for_file(document_id: i32, conn: &mut SqliteConnection) -
     .filter(body::source_id.eq(document_id))
     .select(body::text)
     .order_by(body::id.asc())
-    .load::<String>(conn)
-    .unwrap();
+    .load::<String>(conn)?;
 
   Ok(parsed_text_rows)
 }

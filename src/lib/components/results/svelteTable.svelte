@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
-	import { documentsShown, ignoreDialogOpen, locationShown, preferLastOpened, shiftKeyPressed, compactViewMode, selectedResult, showResultTextPreview, noMoreResults, searchInProgress, showIconGrid, base64Images, isMac, resultsPageShown } from '$lib/stores';
+	import { createVirtualizer } from '@tanstack/svelte-virtual';
+	import type { SvelteVirtualizer } from '@tanstack/svelte-virtual';
+	import { documentsShown, ignoreDialogOpen, locationShown, preferLastOpened, shiftKeyPressed, compactViewMode, selectedResult, showResultTextPreview, noMoreResults, searchInProgress, showIconGrid, base64Images, isMac, resultsPageShown, tableVirtualizer } from '$lib/stores';
 	import FileTypeIcon from '$lib/components/ui/FileTypeIcon.svelte';
 	import { stringToHash, resetColumnSize } from '$lib/utils/miscUtils';
 	import { clickRow } from '$lib/utils/fileUtils';
@@ -18,6 +20,34 @@
 
 	let pathToIgnore = "";
 
+	// The scrollable container that wraps this component (set by resultsTable.svelte).
+	export let scrollElement: HTMLElement | null = null;
+
+	// Only the rows visible in the scroll viewport are rendered; scrolling the
+	// container recomputes the visible range. Rows are measured so their real
+	// height is used for the scroll extent.
+	let virtualizer: SvelteVirtualizer<HTMLElement, HTMLElement> | null = null;
+	const tableVirtualizerStore = createVirtualizer<HTMLElement, HTMLElement>({
+		count: 0,
+		getScrollElement: () => scrollElement,
+		estimateSize: () => ($compactViewMode ? 38 : 46),
+		overscan: 12,
+	});
+	$: virtualizer = $tableVirtualizerStore;
+	$: tableVirtualizer.set(virtualizer);
+	$: virtualizer?.setOptions({ count: allRows.length });
+
+	// Measure a virtual row and clean up its ResizeObserver when it scrolls out
+	// of the rendered window (measureElement(null) disposes detached elements).
+	function measureRow(node: HTMLElement) {
+		virtualizer?.measureElement(node);
+		return {
+			destroy() {
+				virtualizer?.measureElement(null);
+			}
+		};
+	}
+
 	// Infinite-scroll state: whether a load-more request is currently in flight.
 	let loadingMore = false;
 	// Sentinel element that triggers loading more results when it scrolls into view.
@@ -32,9 +62,8 @@
 					void loadMoreThenExtend();
 				}
 			},
-			// Pre-trigger when the sentinel is within 150px of the viewport
-			// bottom, so the next page starts loading slightly before it is seen.
-			{ rootMargin: '0px 0px 150px 0px' }
+			// Pre-trigger when the sentinel comes within 300px of viewport bottom
+			{ rootMargin: '0px 0px 300px 0px' }
 		);
 		sentinelObserver.observe(loadMoreSentinel);
 	}
@@ -45,7 +74,7 @@
 
 	// Render every row loaded so far. `rows` is the full (unpaged) store the
 	// table produces from $documentsShown, so no local pagination is needed.
-	$: allRows = $rows as typeof $pageRows;
+	$: allRows = $rows;
 
 	async function loadMoreThenExtend() {
 		if (loadingMore || $searchInProgress || $noMoreResults) return;
@@ -72,16 +101,15 @@
 	function createTableVars(dataRows: DocumentSearchResult[]) {
 		const [table, columns] = createTableFromResults(dataRows);
 		// @ts-ignore
-		const { flatColumns, headerRows, pageRows, rows, tableAttrs, tableBodyAttrs, pluginStates } = table.createViewModel(columns);
-		const { hasNextPage, hasPreviousPage, pageIndex, pageCount, pageSize } = pluginStates.page;
+		const { flatColumns, headerRows, rows, tableAttrs, tableBodyAttrs, pluginStates } = table.createViewModel(columns);
 		const { hiddenColumnIds } = pluginStates.hideCols;
 		const ids = flatColumns.map((c: any) => c.id);
 		const labels = flatColumns.map((c: any) => c.header);
 		const hideForId: Record<string, boolean> = Object.fromEntries(ids.map((id: any) => [id, false]));
-		return { table, columns, flatColumns, headerRows, pageRows, rows, tableAttrs, tableBodyAttrs, pluginStates, hasNextPage, hasPreviousPage, pageIndex, pageCount, pageSize, hiddenColumnIds, ids, labels, hideForId };
+		return { table, columns, flatColumns, headerRows, rows, tableAttrs, tableBodyAttrs, pluginStates, hiddenColumnIds, ids, labels, hideForId };
 	}
 
-	let { table, columns, flatColumns, headerRows, pageRows, rows, tableAttrs, tableBodyAttrs, pluginStates, hasNextPage, hasPreviousPage, pageIndex, pageCount, pageSize, hiddenColumnIds, ids, labels, hideForId } = createTableVars($documentsShown);
+	let { table, columns, flatColumns, headerRows, rows, tableAttrs, tableBodyAttrs, pluginStates, hiddenColumnIds, ids, labels, hideForId } = createTableVars($documentsShown);
 	
 	// HACK: hide columns by default
 	// hideForId['size'] = true;
@@ -99,7 +127,7 @@
 	$: if ($documentsShown) {
 		console.log(">>> reloading... " + $documentsShown.length + " docs");
 		
-		({ table, columns, flatColumns, headerRows, pageRows, rows, tableAttrs, tableBodyAttrs, pluginStates, hasNextPage, hasPreviousPage, pageIndex, pageCount, pageSize, hiddenColumnIds, ids, labels, hideForId } = createTableVars($documentsShown));
+		({ table, columns, flatColumns, headerRows, rows, tableAttrs, tableBodyAttrs, pluginStates, hiddenColumnIds, ids, labels, hideForId } = createTableVars($documentsShown));
 		
 		hideForId['lastModified'] = $preferLastOpened;
 		if ($locationShown === "browser history") {
@@ -115,6 +143,8 @@
 		// row would scroll the container back to the top and trap the user on the
 		// first page.
 		if ($resultsPageShown === 0) {
+			// Start a fresh search at the top of the list.
+			virtualizer?.scrollToIndex(0);
 			$selectedResult = $documentsShown[0];
 			let firstResult = document.querySelector('.result-0') as HTMLElement | null;
 			if (firstResult) {
@@ -219,7 +249,7 @@
 						<LoaderCircle class="h-4 w-4 animate-spin text-muted-foreground" />
 						<Label class="font-normal text-sm text-muted-foreground">Loading more results&hellip;</Label>
 					{:else if $noMoreResults}
-						<Label class="font-normal text-sm text-muted-foreground">You've reached the end of the results</Label>
+						<span class="end-badge">Fin des résultats</span>
 					{/if}
 				</div>
 			</div>
@@ -298,87 +328,93 @@
 			{/each}
 		</thead>
 		{#if $documentsShown.length > 0}
-			<tbody {...$tableBodyAttrs}>
-				{#each allRows as row (row.id)}
-					<Subscribe rowAttrs={row.attrs()} let:rowAttrs>
-						<ContextMenu.Root>
-							<ContextMenu.Trigger>
-								<tr
-									{...rowAttrs}
-									id={stringToHash($documentsShown[Number(row.id)].path)}
-									class={`table-row result-${Number(row.id)}`}
-									role="button"
-									tabindex="0"
-									on:focus={(e) => clickRow(e, $shiftKeyPressed)}
-									on:click={(e) => clickRow(e, $shiftKeyPressed)}
-									on:dblclick={() => openFile($documentsShown[Number(row.id)].path)}
-									draggable="true"
-									on:dragstart={(event) => startDragging($documentsShown[Number(row.id)].path)}
-								>
-									{#each row.cells as cell (cell.id)}
-										<Subscribe attrs={cell.attrs()} let:attrs>
-											<td {...attrs} class={`${cell.id}-col ${$compactViewMode ? 'compact-view' : ''} ${cell.id === 'file_type' ? 'justify-center' : ''}`}
-												title={cell.id === 'name' || cell.id === 'path' ? String(cell.render()) : ''}
-											>
-												{#if cell.id === 'file_type'}
-													<FileTypeIcon filetype={String(cell.render())} />
-												{:else if cell.id === 'name'}
-													{#if $documentsShown[Number(row.id)].last_parsed > 0}
-														<span class="flex items-center gap-1">
-															<i class="bi bi-check-circle fs-small" title="Item contents scanned" style="font-size: 8px; color: var(--bs-success);"></i>
-															<Render of={cell.render()} />
-														</span>
+			<tbody {...$tableBodyAttrs} style="position: relative; display: block; height: {virtualizer ? virtualizer.getTotalSize() : 0}px;">
+				{#if virtualizer}
+					{#each virtualizer.getVirtualItems() as virtualRow (virtualRow.key)}
+						{@const row = allRows[virtualRow.index]}
+						<Subscribe rowAttrs={row.attrs()} let:rowAttrs>
+							<ContextMenu.Root>
+								<ContextMenu.Trigger>
+									<tr
+										{...rowAttrs}
+										id={stringToHash($documentsShown[Number(row.id)].path)}
+										class={`table-row result-${Number(row.id)}`}
+										role="button"
+										tabindex="0"
+										data-index={virtualRow.index}
+										style="position: absolute; top: 0; left: 0; width: 100%; transform: translateY({virtualRow.start}px);"
+										use:measureRow
+										on:focus={(e) => clickRow(e, $shiftKeyPressed)}
+										on:click={(e) => clickRow(e, $shiftKeyPressed)}
+										on:dblclick={() => openFile($documentsShown[Number(row.id)].path)}
+										draggable="true"
+										on:dragstart={(event) => startDragging($documentsShown[Number(row.id)].path)}
+									>
+										{#each row.cells as cell (cell.id)}
+											<Subscribe attrs={cell.attrs()} let:attrs>
+												<td {...attrs} class={`${cell.id}-col ${$compactViewMode ? 'compact-view' : ''} ${cell.id === 'file_type' ? 'justify-center' : ''}`}
+													title={cell.id === 'name' || cell.id === 'path' ? String(cell.render()) : ''}
+												>
+													{#if cell.id === 'file_type'}
+														<FileTypeIcon filetype={String(cell.render())} />
+													{:else if cell.id === 'name'}
+														{#if $documentsShown[Number(row.id)].last_parsed > 0}
+															<span class="flex items-center gap-1">
+																<i class="bi bi-check-circle fs-small" title="Item contents scanned" style="font-size: 8px; color: var(--bs-success);"></i>
+																<Render of={cell.render()} />
+															</span>
+														{:else}
+															<span><Render of={cell.render()} /></span>
+														{/if}
+													{:else if cell.id === 'path'}
+														<button class="w-full text-left truncate hover:underline hover:cursor-pointer" on:click={() => openFileFolder(cell.render().toString())}>
+															<Render of={formatPath(cell.render().toString())} />
+														</button>
 													{:else}
 														<span><Render of={cell.render()} /></span>
 													{/if}
-												{:else if cell.id === 'path'}
-													<button class="w-full text-left truncate hover:underline hover:cursor-pointer" on:click={() => openFileFolder(cell.render().toString())}>
-														<Render of={formatPath(cell.render().toString())} />
-													</button>
-												{:else}
-													<span><Render of={cell.render()} /></span>
-												{/if}
-											</td>
-										</Subscribe>
-									{/each}
-								</tr>
-							</ContextMenu.Trigger>
-							<ContextMenu.Content>
-								{#if $documentsShown[Number(row.id)].file_type !== 'folder' && $documentsShown[Number(row.id)].last_parsed !== 0}
-									<ContextMenu.Item on:click={() => {$showResultTextPreview = true; $selectedResult = $documentsShown[Number(row.id)];}}>
-										Show Preview
+												</td>
+											</Subscribe>
+										{/each}
+									</tr>
+								</ContextMenu.Trigger>
+								<ContextMenu.Content>
+									{#if $documentsShown[Number(row.id)].file_type !== 'folder' && $documentsShown[Number(row.id)].last_parsed !== 0}
+										<ContextMenu.Item on:click={() => {$showResultTextPreview = true; $selectedResult = $documentsShown[Number(row.id)];}}>
+											Show Preview
+										</ContextMenu.Item>
+									{/if}
+									<ContextMenu.Item on:click={() => {
+										$selectedResult = $documentsShown[Number(row.id)];
+										openFileFolder($selectedResult.path)}
+									}>
+										Open {$documentsShown[Number(row.id)].file_type === 'folder' ? 'Folder' : 'File'}
 									</ContextMenu.Item>
-								{/if}
-								<ContextMenu.Item on:click={() => {
-									$selectedResult = $documentsShown[Number(row.id)];
-									openFileFolder($selectedResult.path)}
-								}>
-									Open {$documentsShown[Number(row.id)].file_type === 'folder' ? 'Folder' : 'File'}
-								</ContextMenu.Item>
-								<ContextMenu.Sub>
-									<ContextMenu.SubTrigger>Ignore</ContextMenu.SubTrigger>
-									<ContextMenu.SubContent class="w-48">
-										<ContextMenu.Item on:click={() => {
-											$ignoreDialogOpen = true;
-											$selectedResult = $documentsShown[Number(row.id)];
-											pathToIgnore = $selectedResult.path;
-										}}>
-											Ignore this {row.cells[0].render().toString() === 'folder' ? 'folder' : 'file'}
-										</ContextMenu.Item>
-										<ContextMenu.Item on:click={() => {
-											$ignoreDialogOpen = true; 
-											$selectedResult = $documentsShown[Number(row.id)];
-											if ($isMac) pathToIgnore = $selectedResult.path.split('/').slice(0, -1).join('/');
-											else pathToIgnore = $selectedResult.path.split('\\').slice(0, -1).join('\\');
-										}}>
-											Ignore parent folder
-										</ContextMenu.Item>
-									</ContextMenu.SubContent>
-								</ContextMenu.Sub>
-							</ContextMenu.Content>
-						</ContextMenu.Root>
-					</Subscribe>
-				{/each}
+									<ContextMenu.Sub>
+										<ContextMenu.SubTrigger>Ignore</ContextMenu.SubTrigger>
+										<ContextMenu.SubContent class="w-48">
+											<ContextMenu.Item on:click={() => {
+												$ignoreDialogOpen = true;
+												$selectedResult = $documentsShown[Number(row.id)];
+												pathToIgnore = $selectedResult.path;
+											}}>
+												Ignore this {row.cells[0].render().toString() === 'folder' ? 'folder' : 'file'}
+											</ContextMenu.Item>
+											<ContextMenu.Item on:click={() => {
+												$ignoreDialogOpen = true; 
+												$selectedResult = $documentsShown[Number(row.id)];
+												if ($isMac) pathToIgnore = $selectedResult.path.split('/').slice(0, -1).join('/');
+												else pathToIgnore = $selectedResult.path.split('\\').slice(0, -1).join('\\');
+											}}>
+												Ignore parent folder
+											</ContextMenu.Item>
+										</ContextMenu.SubContent>
+									</ContextMenu.Sub>
+								</ContextMenu.Content>
+							</ContextMenu.Root>
+						</Subscribe>
+					{/each}
+				{/if}
 			</tbody>
 		{/if}
 	</table>
@@ -390,7 +426,7 @@
 					<LoaderCircle class="h-4 w-4 animate-spin text-muted-foreground" />
 					<Label class="font-normal text-sm text-muted-foreground">Loading more results&hellip;</Label>
 				{:else if $noMoreResults}
-					<Label class="font-normal text-sm text-muted-foreground">You've reached the end of the results</Label>
+					<span class="end-badge">Fin des résultats</span>
 				{/if}
 			</div>
 		</div>
@@ -503,22 +539,19 @@
 
 	tbody {
 		display: block;
-		overflow-y: scroll;
-		overflow-x: auto !important;
-		// max-height: calc(100vh - 170px);
 	}
-
 
 	:global::-webkit-scrollbar {
 		width: 0px;
 		background: transparent; /* make scrollbar transparent */
 	}
 
+	// Scroll offset is owned by the resultsTable.svelte wrapper viewport
+	// (scrollElement); neither tbody nor #parent-grid may create their own
+	// vertical scrollbar or they'd fight the virtualizer for the scroll extent.
 	#parent-grid {
-    overflow-x: hidden; /* Hide horizontal scrollbar */
-    overflow-y: auto; /* Enable vertical scrolling */
-		max-height: 60svh;
-  }
+		overflow-x: hidden;
+	}
   .img-thumbnail {
     max-height: 72px;
     max-width: 96px;
@@ -550,8 +583,24 @@
     bottom: 100%;
     height: 96px;
     // Gradient fade hiding the end of the list (adapts to the app background).
-    background: linear-gradient(to bottom, transparent, var(--bs-body-bg, #ffffff));
+    background: linear-gradient(to top, hsl(var(--background)), transparent);
     pointer-events: none;
     z-index: 5;
+  }
+  // Polished end-of-results badge shown when every loaded page has been fetched.
+  .end-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.3rem 0.9rem;
+    border-radius: 9999px;
+    font-size: 0.8rem;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    color: var(--bs-secondary-color, inherit);
+    background: hsl(var(--background));
+    border: 1px solid hsl(var(--border) / 0.6);
+    box-shadow: 0 1px 2px hsl(var(--foreground) / 0.06);
+    opacity: 0.9;
   }
 </style>

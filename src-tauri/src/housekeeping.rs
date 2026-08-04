@@ -99,7 +99,8 @@ pub fn initialize() -> () {
   create_app_directory_if_not_exists().unwrap();
   create_tantivy_index_directory_if_not_exists().unwrap();
 
-  let mut conn = establish_direct_connection_to_db();
+  let mut conn = establish_direct_connection_to_db()
+    .expect("Could not create a direct DB connection at startup");
   log::info!("Initializing database");
   create_tables_if_not_exists(&mut conn).unwrap();
 

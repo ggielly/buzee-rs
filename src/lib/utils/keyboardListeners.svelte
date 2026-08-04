@@ -1,8 +1,8 @@
 <script lang="ts">
 	import { invoke } from "@tauri-apps/api/core";
 	import { onMount } from 'svelte';
-	import { clickRow, selectOneRow, selectAllRows } from './fileUtils';
-	import { isMac, documentsShown, shiftKeyPressed, metaKeyPressed, showResultTextPreview, selectedResult, showIconGrid, searchSuggestionsDialogOpen } from '$lib/stores';
+	import { clickRow, selectAllRows } from './fileUtils';
+	import { isMac, documentsShown, shiftKeyPressed, metaKeyPressed, showResultTextPreview, selectedResult, showIconGrid, searchSuggestionsDialogOpen, tableVirtualizer } from '$lib/stores';
 	import { trackEvent } from '@aptabase/web';
 	import { goto } from '$app/navigation';
 	import { page } from "$app/stores";
@@ -40,6 +40,32 @@
 	];
 
 	const eventPrefix = 'keyboardListener:';
+
+	// Move the selection to the result at `index`. In the table view only the
+	// visible rows are rendered (virtualized), so the target is scrolled into
+	// view first and then selected/focused once it is in the DOM.
+	function selectResultByIndex(index: number) {
+		if (index < 0 || index >= $documentsShown.length) return;
+		$selectedResult = $documentsShown[index];
+		const selectAndFocus = () => {
+			const rowEl = document.querySelector(`.result-${index}`) as HTMLElement | null;
+			if (rowEl) {
+				document.querySelectorAll('.table-row.selected').forEach((r) => r.classList.remove('selected'));
+				clickRow(
+					{ currentTarget: rowEl } as MouseEvent & { currentTarget: EventTarget & HTMLDivElement },
+					$shiftKeyPressed
+				);
+			}
+		};
+		if ($showIconGrid) {
+			// Grid rows are all rendered; select immediately.
+			selectAndFocus();
+		} else {
+			// Table view: bring the target into view, then select once rendered.
+			$tableVirtualizer?.scrollToIndex(index, { align: 'auto' });
+			setTimeout(selectAndFocus, 60);
+		}
+	}
 
 	function keydownListener(e: KeyboardEvent) {
 		if (e.code === 'MetaLeft' || e.code === 'MetaRight' || e.code === 'ControlLeft' || e.code === 'ControlRight') {
@@ -135,24 +161,8 @@
 						trackEvent(eventPrefix + 'deselectAllRows');
 						selectAllRows(true);
 					}
-					if ($shiftKeyPressed) {
-						// Have to find which is the "highest" result selected
-						// const lastSelected = document.getElementsByClassName("selected")[0];
-						// const lastSelectedIndex = Array.from(lastSelected?.classList).find((className) => className.startsWith("result-"))?.split("-")[1];
-						// let prevIndex = (Number(lastSelectedIndex) ?? 0) - 1;
-						// let prevElement = document.getElementsByClassName("result-" + prevIndex.toString())[0];
-						// if (prevElement) {
-						//   selectOneRow(prevElement as HTMLDivElement);
-						// }
-					} else {
-						let prevElement = selectedElement.parentElement?.previousElementSibling?.children[0] as HTMLDivElement;
-						clickRow(
-							{ currentTarget: prevElement } as MouseEvent & {
-								currentTarget: EventTarget & HTMLDivElement;
-							},
-							$shiftKeyPressed
-						);
-					}
+					const current = Number(thisResultIndex);
+					selectResultByIndex(current >= 0 ? current - 1 : -1);
 					return;
 				} else if ((!$showIconGrid && e.code === 'ArrowDown') || ($showIconGrid && e.code === 'ArrowRight')) {
 					e.preventDefault();
@@ -160,24 +170,8 @@
 						trackEvent(eventPrefix + 'deselectAllRows');
 						selectAllRows(true);
 					}
-					if ($shiftKeyPressed) {
-						// Have to find which is the "lowest" result selected
-						// const lastSelected = document.getElementsByClassName("selected")[document.getElementsByClassName("selected").length - 1];
-						// const lastSelectedIndex = Array.from(lastSelected?.classList).find((className) => className.startsWith("result-"))?.split("-")[1];
-						// let nextIndex = (Number(lastSelectedIndex) ?? 0) + 1;
-						// let nextElement = document.getElementsByClassName("result-" + nextIndex.toString())[0];
-						// if (nextElement) {
-						//   selectOneRow(nextElement as HTMLDivElement);
-						// }
-					} else {
-						let nextElement = selectedElement.parentElement?.nextElementSibling?.children[0] as HTMLDivElement;
-						clickRow(
-							{ currentTarget: nextElement } as MouseEvent & {
-								currentTarget: EventTarget & HTMLDivElement;
-							},
-							$shiftKeyPressed
-						);
-					}
+					const current = Number(thisResultIndex);
+					selectResultByIndex(current + 1);
 					return;
 				}
 			}

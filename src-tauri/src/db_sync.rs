@@ -43,18 +43,27 @@ pub async fn run_sync_operation(window: tauri::WebviewWindow, app: AppHandle, sw
       if file_paths.len() == 0 {
         file_paths.push(home_directory.clone());
       }
-      let mut new_conn = establish_connection(&app);
-      let _files_added = walk_directory(&mut new_conn, &window, file_paths, app.clone());
+      
+      // Offload the CPU/disk-heavy walk_directory call to a blocking worker thread
+      let window_clone = window.clone();
+      let app_for_walk = app.clone();
+      let file_paths_for_walk = file_paths.clone();
+      let _ = tokio::task::spawn_blocking(move || {
+        let mut new_conn = establish_connection(&app_for_walk);
+        walk_directory(&mut new_conn, &window_clone, file_paths_for_walk, app_for_walk)
+      }).await;
 
       if detailed_scan_allowed {
         // Then start parsing the content of all files and add it to the body table
         log::info!("Parsing content from files");
+        let mut new_conn = establish_connection(&app);
         let files_parsed = parse_content_from_files(&mut new_conn, window.clone(), app.clone()).await;
         log::info!("Files parsed: {}", files_parsed);
       }
       // Emit closing sync status to the frontend
       log::info!("Sending message to frontend: Sync operation completed");
-      set_scan_running_status(&mut new_conn, false, true, &app);
+      let mut end_conn = establish_connection(&app);
+      set_scan_running_status(&mut end_conn, false, true, &app);
       send_message_to_frontend(&window, "sync-status".to_string(), "sync-status".to_string(), "false".to_string());
       info!("FILE SYNC FINISHED AT {}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64);
       send_message_to_frontend(&window, "file-sync-finished".to_string(), "sync-finished".to_string(), "true".to_string());
@@ -79,9 +88,15 @@ pub async fn add_specific_folders(window: &tauri::WebviewWindow, file_paths: Vec
   log::info!("file paths: {:?}", file_paths);
   log::info!("Adding specific folders...");
   let window = window.clone();
-  // Spawn the new task
-  tokio::spawn(async move {
-    let mut conn = establish_direct_connection_to_db();
+  // Offload blocking folder additions and directory walk to tokio::task::spawn_blocking
+  tokio::task::spawn_blocking(move || {
+    let mut conn = match establish_direct_connection_to_db() {
+      Ok(conn) => conn,
+      Err(e) => {
+        log::error!("Could not create direct DB connection: {}", e);
+        return;
+      }
+    };
     if file_paths.len() > 0 {
       // This is when user manually adds folder/file(s)
       let file_paths_clone = file_paths.clone();
@@ -93,7 +108,7 @@ pub async fn add_specific_folders(window: &tauri::WebviewWindow, file_paths: Vec
     } else {
       // This is the onboarding run
       let mut file_paths = file_paths;
-      let home_directory = get_home_directory().unwrap();
+      let home_directory = get_home_directory().unwrap_or("/".to_string());
       file_paths.push(home_directory);
       let _files_added = walk_directory(&mut conn, &window, file_paths, app);
     }

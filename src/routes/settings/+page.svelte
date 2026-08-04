@@ -1,17 +1,18 @@
 <script lang="ts">
 	import { fade } from 'svelte/transition';
 	import PopoverIcon from '$lib/components/ui/popoverIcon.svelte';
-	import { onMount } from 'svelte';
+	import { onMount, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { trackEvent } from '@aptabase/web';
 	import { invoke } from '@tauri-apps/api/core';
+	import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 	import { isMac, statusMessage, userPreferences, dbCreationInProgress, syncStatus, darkMode } from '$lib/stores';
 	import { ask, open, message } from '@tauri-apps/plugin-dialog';
 	import * as Dialog from "$lib/components/ui/dialog";
   import Button from "$lib/components/ui/button/button.svelte";
 	import * as Select from "$lib/components/ui/select";
 	import { Switch } from "$lib/components/ui/switch";
-	import {PencilLine, TriangleAlert, RefreshCw} from "lucide-svelte";
+	import {PencilLine, TriangleAlert, RefreshCw, ScanLine} from "lucide-svelte";
 	import Separator from '$lib/components/ui/separator/separator.svelte';
 	import Input from '$lib/components/ui/input/input.svelte';
 
@@ -32,6 +33,32 @@
 	let rescanInProgress = false;
 	let enableLogs: boolean;
 	let pdfMaxOcrPages: number;
+	let ocrThreads: number;
+	let ocrSortOrder: string;
+	let selectedOcrSortOrder = { value: "size_asc", label: "Smallest first" };
+	let ocrSortOrderLabels: Record<string, string> = {
+		"size_asc": "Smallest first",
+		"size_desc": "Largest first",
+		"name_asc": "Name (A-Z)",
+		"name_desc": "Name (Z-A)",
+		"modified_asc": "Oldest modified first",
+		"modified_desc": "Newest modified first",
+	};
+	let ocrRescanInProgress = false;
+	let ocrRescanDialogOpen = false;
+	let ocrRescanProgress = 0;
+	let ocrRescanTotal = 0;
+	let ocrRescanSuccess = 0;
+	let ocrRescanFailed = 0;
+	let ocrRescanCurrentFile = "";
+	let ocrRescanThreads = 1;
+	let ocrRescanFailedFiles: { path: string; name: string; error: string }[] = [];
+	let ocrRescanSuccessFiles: { path: string; name: string }[] = [];
+	let ocrRescanFinished = false;
+	let showFailedList = false;
+	let showSuccessList = false;
+	let unlistenOcrScanProgress: UnlistenFn;
+	let unlistenOcrRescanProgress: UnlistenFn;
 
 	function setKeydownHandlerOnGlobalShortuctInput(event: KeyboardEvent) {
 		console.log("~>>! pressed:", event.key);
@@ -137,6 +164,123 @@
 		invoke("set_pdf_max_ocr_pages", { pages: pdfMaxOcrPages }).then(() => {
 			console.log("Set PDF max OCR pages to: " + pdfMaxOcrPages);
 		});
+	}
+
+	function updateOcrThreads() {
+		ocrThreads = Math.max(1, Math.min(4, Math.round(ocrThreads)));
+		trackEvent('click:updateOcrThreads', { ocrThreads });
+		$statusMessage = `Setting changed.`;
+		setTimeout(() => {$statusMessage = "";}, 3000);
+		invoke("set_ocr_threads", { threads: ocrThreads }).then(() => {
+			console.log("Set OCR threads to: " + ocrThreads);
+		});
+	}
+
+	function updateOcrSortOrder() {
+		trackEvent('click:updateOcrSortOrder', { ocrSortOrder });
+		$statusMessage = `Setting changed.`;
+		setTimeout(() => {$statusMessage = "";}, 3000);
+		invoke("set_ocr_sort_order", { sortOrder: ocrSortOrder }).then(() => {
+			console.log("Set OCR sort order to: " + ocrSortOrder);
+		});
+	}
+
+	async function startOcrRescan() {
+		trackEvent('click:startOcrRescan');
+		ocrRescanInProgress = true;
+		ocrRescanFinished = false;
+		ocrRescanProgress = 0;
+		ocrRescanSuccess = 0;
+		ocrRescanFailed = 0;
+		ocrRescanCurrentFile = "";
+		ocrRescanFailedFiles = [];
+		ocrRescanSuccessFiles = [];
+		showFailedList = false;
+		showSuccessList = false;
+		$statusMessage = "Starting OCR rescan...";
+		try {
+			await invoke("start_ocr_rescan");
+		} catch (error) {
+			$statusMessage = "OCR rescan could not start.";
+			console.error(error);
+			ocrRescanInProgress = false;
+		}
+	}
+
+	async function retryFailedOcrFiles() {
+		trackEvent('click:retryFailedOcrFiles');
+		if (ocrRescanFailedFiles.length === 0) return;
+		const paths = ocrRescanFailedFiles.map((f) => f.path);
+		ocrRescanInProgress = true;
+		ocrRescanFinished = false;
+		ocrRescanProgress = 0;
+		ocrRescanSuccess = 0;
+		ocrRescanFailed = 0;
+		ocrRescanCurrentFile = "";
+		ocrRescanFailedFiles = [];
+		ocrRescanSuccessFiles = [];
+		showFailedList = false;
+		showSuccessList = false;
+		$statusMessage = "Retrying failed OCR files...";
+		try {
+			await invoke("rescan_ocr_files", { paths });
+		} catch (error) {
+			$statusMessage = "OCR rescan could not start.";
+			console.error(error);
+			ocrRescanInProgress = false;
+		}
+	}
+
+	async function retrySingleOcrFile(path: string) {
+		trackEvent('click:retrySingleOcrFile');
+		ocrRescanInProgress = true;
+		ocrRescanFinished = false;
+		ocrRescanProgress = 0;
+		ocrRescanSuccess = 0;
+		ocrRescanFailed = 0;
+		ocrRescanCurrentFile = "";
+		ocrRescanFailedFiles = [];
+		ocrRescanSuccessFiles = [];
+		showFailedList = false;
+		showSuccessList = false;
+		$statusMessage = "Retrying OCR on one file...";
+		try {
+			await invoke("rescan_ocr_files", { paths: [path] });
+		} catch (error) {
+			$statusMessage = "OCR rescan could not start.";
+			console.error(error);
+			ocrRescanInProgress = false;
+		}
+	}
+
+	async function stopOcrRescan() {
+		trackEvent('click:stopOcrRescan');
+		$statusMessage = "Stopping OCR rescan...";
+		await invoke("stop_ocr_rescan");
+	}
+
+	// The per-file progress events deliberately omit the file lists (they can be
+	// huge). Fetch them from the backend on demand when the user expands a list.
+	async function toggleSuccessList() {
+		showSuccessList = !showSuccessList;
+		if (showSuccessList && ocrRescanSuccessFiles.length === 0) {
+			try {
+				ocrRescanSuccessFiles = await invoke("get_ocr_rescan_success_files");
+			} catch (error) {
+				console.error("Failed to fetch succeeded files:", error);
+			}
+		}
+	}
+
+	async function toggleFailedList() {
+		showFailedList = !showFailedList;
+		if (showFailedList && ocrRescanFailedFiles.length === 0) {
+			try {
+				ocrRescanFailedFiles = await invoke("get_ocr_rescan_failed_files");
+			} catch (error) {
+				console.error("Failed to fetch failed files:", error);
+			}
+		}
 	}
 
 	function toggleAutomaticBackgroundSync() {
@@ -273,7 +417,7 @@
 		});
 	}
 
-	onMount(() => {
+	onMount(async () => {
 		invoke("get_os").then((res) => {
 			// @ts-ignore
 			if (res == "macos") {
@@ -320,7 +464,78 @@
 			manualSetupMode = $userPreferences.manual_setup;
 			enableLogs = $userPreferences.enable_logs;
 			pdfMaxOcrPages = $userPreferences.pdf_max_ocr_pages;
+			ocrThreads = $userPreferences.ocr_threads;
+			ocrSortOrder = $userPreferences.ocr_sort_order;
+			selectedOcrSortOrder = { value: ocrSortOrder, label: ocrSortOrderLabels[ocrSortOrder] ?? "Smallest first" };
 		});
+
+		// Listen to OCR rescan progress/finish events. The rich "ocr-rescan-progress"
+		// event carries a JSON payload in its data field with all the stats the
+		// dialog needs (total, processed, success, failed, current file, threads,
+		// and the running list of failed files).
+		unlistenOcrRescanProgress = await listen<{message: string, data: string}>('ocr-rescan-progress', (event) => {
+			if (!event.payload) return;
+			try {
+				const progress = JSON.parse(event.payload.data);
+				if (progress.message === "started") {
+					ocrRescanInProgress = true;
+					ocrRescanFinished = false;
+					ocrRescanProgress = 0;
+					ocrRescanTotal = progress.total || 0;
+					ocrRescanSuccess = 0;
+					ocrRescanFailed = 0;
+					ocrRescanCurrentFile = "";
+					ocrRescanThreads = progress.threads || 1;
+					ocrRescanFailedFiles = progress.failed_files || [];
+					ocrRescanSuccessFiles = progress.success_files || [];
+					showFailedList = false;
+					showSuccessList = false;
+				} else if (progress.message === "progress") {
+					ocrRescanProgress = progress.processed || 0;
+					ocrRescanTotal = progress.total || 0;
+					ocrRescanSuccess = progress.success || 0;
+					ocrRescanFailed = progress.failed || 0;
+					ocrRescanCurrentFile = progress.current_file || "";
+					ocrRescanThreads = progress.threads || 1;
+					ocrRescanFailedFiles = progress.failed_files || [];
+					ocrRescanSuccessFiles = progress.success_files || [];
+				} else if (progress.message === "finished" || progress.message === "cancelled") {
+					ocrRescanProgress = progress.processed || 0;
+					ocrRescanTotal = progress.total || 0;
+					ocrRescanSuccess = progress.success || 0;
+					ocrRescanFailed = progress.failed || 0;
+					ocrRescanCurrentFile = "";
+					ocrRescanThreads = progress.threads || 1;
+					ocrRescanFailedFiles = progress.failed_files || [];
+					ocrRescanSuccessFiles = progress.success_files || [];
+					ocrRescanInProgress = false;
+					ocrRescanFinished = true;
+					showFailedList = false;
+					showSuccessList = false;
+					$statusMessage = progress.message === "finished"
+						? "OCR rescan complete!"
+						: "OCR rescan cancelled.";
+					setTimeout(() => {$statusMessage = "";}, 4000);
+				}
+			} catch (error) {
+				console.error("Failed to parse OCR rescan progress:", error);
+			}
+		});
+		unlistenOcrScanProgress = await listen<{message: string, data: string}>('scan-progress', (event) => {
+			if (event.payload?.message === "scan_started") {
+				ocrRescanProgress = 0;
+				ocrRescanTotal = Number(event.payload.data) || 0;
+			} else if (event.payload?.message === "scan_progress") {
+				const [processed, total] = event.payload.data.split("/");
+				ocrRescanProgress = Number(processed) || 0;
+				ocrRescanTotal = Number(total) || 0;
+			}
+		});
+	});
+
+	onDestroy(() => {
+		if (unlistenOcrRescanProgress) unlistenOcrRescanProgress();
+		if (unlistenOcrScanProgress) unlistenOcrScanProgress();
 	});
 </script>
 
@@ -586,6 +801,273 @@
 					bind:value={pdfMaxOcrPages}
 					class="h-9 w-full"
 				/>
+			</td>
+		</tr>
+		<tr>
+			<td class="text-center px-2">
+				<Button variant="outline" size="sm" type="button" on:click={() => updateOcrThreads()}>Save</Button>
+			</td>
+			<td class="py-2 skip-hover">
+				OCR Threads
+				<div class="flex items-center small-explanation gap-1">
+					<div>Number of files OCR-ed in parallel during a rescan. Higher values are faster but use more CPU.</div>
+				</div>
+			</td>
+			<td class="w-32">
+				<Input
+					type="number"
+					min="1"
+					max="4"
+					bind:value={ocrThreads}
+					class="h-9 w-full"
+				/>
+			</td>
+		</tr>
+		<tr>
+			<td class="text-center px-2">
+				<Button variant="outline" size="sm" type="button" on:click={() => updateOcrSortOrder()}>Save</Button>
+			</td>
+			<td class="py-2 skip-hover">
+				OCR Rescan Order
+				<div class="flex items-center small-explanation gap-1">
+					<div>Order in which files are OCR-ed during a rescan.</div>
+				</div>
+			</td>
+			<td class="w-40">
+				<Select.Root bind:selected={selectedOcrSortOrder} onSelectedChange={(v) => { if (v?.value) { ocrSortOrder = v.value; updateOcrSortOrder(); } }}>
+					<Select.Trigger class="w-full h-9 justify-between">
+						<Select.Value placeholder="Smallest first" />
+					</Select.Trigger>
+					<Select.Content>
+						<Select.Item value="size_asc">Smallest first</Select.Item>
+						<Select.Item value="size_desc">Largest first</Select.Item>
+						<Select.Item value="name_asc">Name (A-Z)</Select.Item>
+						<Select.Item value="name_desc">Name (Z-A)</Select.Item>
+						<Select.Item value="modified_asc">Oldest modified first</Select.Item>
+						<Select.Item value="modified_desc">Newest modified first</Select.Item>
+					</Select.Content>
+				</Select.Root>
+			</td>
+		</tr>
+		<tr class="hover:text-violet-500">
+			<td class="text-center px-2">
+				<Dialog.Root bind:open={ocrRescanDialogOpen}>
+					<Dialog.Trigger class="flex justify-center items-center w-full">
+						<ScanLine class="h-6 w-6" />
+					</Dialog.Trigger>
+					<Dialog.Content>
+						<Dialog.Header>
+							<Dialog.Title>Rescan OCR Documents</Dialog.Title>
+							<Dialog.Description>Re-run OCR on all PDFs and images</Dialog.Description>
+						</Dialog.Header>
+						{#if ocrRescanInProgress}
+							<!-- Live progress view -->
+							<div class="flex flex-col gap-3">
+								{#if ocrRescanTotal > 0}
+									<div class="w-full">
+										<div class="flex justify-between text-sm mb-1">
+											<span>{ocrRescanProgress} / {ocrRescanTotal} files</span>
+											<span>{Math.round((ocrRescanProgress / ocrRescanTotal) * 100)}%</span>
+										</div>
+										<div class="w-full h-2 bg-muted rounded-full overflow-hidden">
+											<div
+												class="h-full bg-violet-500 transition-all"
+												style="width: {(ocrRescanTotal > 0 ? (ocrRescanProgress / ocrRescanTotal) * 100 : 0)}%"
+											></div>
+										</div>
+									</div>
+								{/if}
+								<div class="grid grid-cols-2 gap-2 text-sm">
+									<div class="flex items-center gap-2">
+										<span class="text-muted-foreground">Threads:</span>
+										<span>{ocrRescanThreads}</span>
+									</div>
+									<div class="flex items-center gap-2">
+										<span class="text-muted-foreground">Remaining:</span>
+										<span>{Math.max(0, ocrRescanTotal - ocrRescanProgress)}</span>
+									</div>
+									<div class="flex items-center gap-2">
+										<span class="text-muted-foreground">Succeeded:</span>
+										<span class="text-green-600">{ocrRescanSuccess}</span>
+									</div>
+									<div class="flex items-center gap-2">
+										<span class="text-muted-foreground">Errors:</span>
+										<span class="text-red-600">{ocrRescanFailed}</span>
+									</div>
+								</div>
+								{#if ocrRescanCurrentFile}
+									<div class="text-sm">
+										<span class="text-muted-foreground">Currently:</span>
+										<span class="ml-1 break-all font-mono">{ocrRescanCurrentFile}</span>
+									</div>
+								{/if}
+
+								<!-- Expandable success list (live) -->
+								{#if ocrRescanSuccessFiles.length > 0}
+									<div class="border rounded-md overflow-hidden">
+										<button
+											type="button"
+											class="w-full flex items-center justify-between px-3 py-2 text-sm font-medium hover:bg-muted"
+											on:click={() => toggleSuccessList()}
+										>
+											<span>Succeeded files ({ocrRescanSuccessFiles.length})</span>
+											<span>{showSuccessList ? '▲' : '▼'}</span>
+										</button>
+										{#if showSuccessList}
+											<ul class="max-h-40 overflow-y-auto p-2 text-xs flex flex-col divide-y divide-border">
+												{#each ocrRescanSuccessFiles as ok}
+													<li class="py-1 break-all font-mono" title={ok.path}>
+														<span class="text-green-600 mr-1">✓</span>{ok.path}
+													</li>
+												{/each}
+											</ul>
+										{/if}
+									</div>
+								{/if}
+								<!-- Expandable failed list (live) -->
+								{#if ocrRescanFailedFiles.length > 0}
+									<div class="border rounded-md overflow-hidden">
+										<button
+											type="button"
+											class="w-full flex items-center justify-between px-3 py-2 text-sm font-medium hover:bg-muted"
+											on:click={() => toggleFailedList()}
+										>
+											<span class="text-red-600">Failed files ({ocrRescanFailedFiles.length})</span>
+											<span>{showFailedList ? '▲' : '▼'}</span>
+										</button>
+										{#if showFailedList}
+											<ul class="max-h-40 overflow-y-auto p-2 text-xs flex flex-col divide-y divide-border">
+												{#each ocrRescanFailedFiles as failed}
+													<li class="py-1 flex items-center justify-between gap-2">
+														<span class="break-all font-mono flex-1" title={`${failed.path}\n${failed.error}`}>
+															<span class="text-red-600 mr-1">✕</span>{failed.path}
+															{#if failed.error}
+																<div class="text-muted-foreground mt-0.5">{failed.error}</div>
+															{/if}
+														</span>
+														<Button variant="outline" size="sm" type="button" on:click={() => retrySingleOcrFile(failed.path)} class="shrink-0">
+															Retry
+														</Button>
+													</li>
+												{/each}
+											</ul>
+										{/if}
+									</div>
+								{/if}
+							</div>
+						{:else if ocrRescanFinished}
+							<!-- Result view -->
+							<div class="flex flex-col gap-3">
+								<div class="grid grid-cols-2 gap-2 text-sm">
+									<div class="flex items-center gap-2">
+										<span class="text-muted-foreground">Processed:</span>
+										<span>{ocrRescanProgress}</span>
+									</div>
+									<div class="flex items-center gap-2">
+										<span class="text-muted-foreground">Threads:</span>
+										<span>{ocrRescanThreads}</span>
+									</div>
+									<div class="flex items-center gap-2">
+										<span class="text-muted-foreground">Succeeded:</span>
+										<span class="text-green-600">{ocrRescanSuccess}</span>
+									</div>
+									<div class="flex items-center gap-2">
+										<span class="text-muted-foreground">Errors:</span>
+										<span class="text-red-600">{ocrRescanFailed}</span>
+									</div>
+								</div>
+
+								{#if ocrRescanSuccessFiles.length > 0}
+									<div class="border rounded-md overflow-hidden">
+										<button
+											type="button"
+											class="w-full flex items-center justify-between px-3 py-2 text-sm font-medium hover:bg-muted"
+											on:click={() => toggleSuccessList()}
+										>
+											<span>Succeeded files ({ocrRescanSuccessFiles.length})</span>
+											<span>{showSuccessList ? '▲' : '▼'}</span>
+										</button>
+										{#if showSuccessList}
+											<ul class="max-h-40 overflow-y-auto p-2 text-xs flex flex-col divide-y divide-border">
+												{#each ocrRescanSuccessFiles as ok}
+													<li class="py-1 break-all font-mono" title={ok.path}>
+														<span class="text-green-600 mr-1">✓</span>{ok.path}
+													</li>
+												{/each}
+											</ul>
+										{/if}
+									</div>
+								{/if}
+
+								{#if ocrRescanFailedFiles.length > 0}
+									<div class="border rounded-md overflow-hidden">
+										<button
+											type="button"
+											class="w-full flex items-center justify-between px-3 py-2 text-sm font-medium hover:bg-muted"
+											on:click={() => toggleFailedList()}
+										>
+											<span class="text-red-600">Failed files ({ocrRescanFailedFiles.length})</span>
+											<span>{showFailedList ? '▲' : '▼'}</span>
+										</button>
+										{#if showFailedList}
+											<ul class="max-h-40 overflow-y-auto p-2 text-xs flex flex-col divide-y divide-border">
+												{#each ocrRescanFailedFiles as failed}
+													<li class="py-1 flex items-center justify-between gap-2">
+														<span class="break-all font-mono flex-1" title={`${failed.path}\n${failed.error}`}>
+															<span class="text-red-600 mr-1">✕</span>{failed.path}
+															{#if failed.error}
+																<div class="text-muted-foreground mt-0.5">{failed.error}</div>
+															{/if}
+														</span>
+														<Button variant="outline" size="sm" type="button" on:click={() => retrySingleOcrFile(failed.path)} class="shrink-0">
+															Retry
+														</Button>
+													</li>
+												{/each}
+											</ul>
+										{/if}
+									</div>
+								{:else}
+									<p class="text-sm text-green-600 mb-0">All files were processed successfully!</p>
+								{/if}
+							</div>
+						{:else}
+							<p class="mb-0">
+								This will re-run OCR on every PDF and image in the database, including files
+								that were already processed. This can take a long time depending on the
+								number of files.<br/><br/>
+								Processing order and parallelism can be tuned in the OCR settings above.
+							</p>
+						{/if}
+						<Dialog.Footer>
+							{#if ocrRescanInProgress}
+								<Button variant="secondary" on:click={() => stopOcrRescan()}>
+									Stop
+								</Button>
+							{:else}
+								<Dialog.Close asChild let:builder>
+									<Button variant="secondary" aria-label="Close" builders={[builder]}>Close</Button>
+								</Dialog.Close>
+								{#if ocrRescanFinished && ocrRescanFailedFiles.length > 0}
+									<Button variant="destructive" on:click={() => retryFailedOcrFiles()}>
+										Retry failed ({ocrRescanFailedFiles.length})
+									</Button>
+								{/if}
+								<Button on:click={() => startOcrRescan()}>
+									Start OCR rescan
+								</Button>
+							{/if}
+						</Dialog.Footer>
+					</Dialog.Content>
+				</Dialog.Root>
+			</td>
+			<td class="py-2 skip-hover" role="button" on:click={() => {ocrRescanDialogOpen = true;}}>
+				Rescan OCR Documents
+				<div class="flex items-center small-explanation gap-1">
+					<div>Re-run OCR on all PDFs and images already in the database.</div>
+				</div>
+			</td>
+			<td>
 			</td>
 		</tr>
 		<tr class="hover:text-red-500">

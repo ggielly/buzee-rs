@@ -1,10 +1,18 @@
 import { invoke } from "@tauri-apps/api/core";
 import { extractDate, cleanSearchQuery } from "./queryParsing";
-import { searchQuery, locationShown, resultsPageShown, noMoreResults, searchInProgress, filetypeShown, resultsPerPage, documentsShown, allowedExtensions, base64Images, showIconGrid,  dateLimitUNIX } from "$lib/stores";
+import { searchQuery, locationShown, resultsPageShown, noMoreResults, searchInProgress, filetypeShown, resultsPerPage, documentsShown, allowedExtensions, clearBase64Images, showIconGrid,  dateLimitUNIX } from "$lib/stores";
 import { trackEvent } from "@aptabase/web";
 import { setExtensionCategory } from "$lib/utils/miscUtils";
 import { getResultThumbnails } from '$lib/utils/fileTable';
 import { get } from 'svelte/store';
+
+// Lightweight in-memory search query cache to optimize IPC traffic
+const searchCache = new Map<string, { results: DocumentSearchResult[]; timestamp: number }>();
+const CACHE_TTL_MS = 45_000;
+
+export function clearSearchCache() {
+  searchCache.clear();
+}
 
 export async function getDocumentsFromDB(page:number, limit:number) {
   let filetypeToGet = get(filetypeShown);
@@ -15,28 +23,38 @@ export async function getDocumentsFromDB(page:number, limit:number) {
   let type: String | undefined = filetypeToGet;
   if (type === "any") type = undefined;
   
+  const cacheKey = `recent|${page}|${limit}|${type || 'all'}`;
+  const cached = searchCache.get(cacheKey);
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
+    return cached.results;
+  }
+
   console.log("getting documents from db of type", type);
   const results: DocumentSearchResult[] = await invoke("get_recent_docs", { page: page, limit: limit*2, fileType: type });
+  searchCache.set(cacheKey, { results, timestamp: Date.now() });
   return results;
 }
 
 export async function searchDocuments(query:string, page:number, limit:number, type?:string, dateLimitUNIX?: ParsedDatesUNIX | null) {
   let results: DocumentSearchResult[] = [];
+  const cacheKey = `${get(locationShown)}|${query}|${page}|${limit}|${type || 'any'}|${JSON.stringify(dateLimitUNIX || {})}`;
+  const cached = searchCache.get(cacheKey);
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
+    return cached.results;
+  }
+
   console.log("searching documents with query", query, "page", page, "limit", limit, "type", type, "dateLimitUNIX", dateLimitUNIX);
 
   if (get(locationShown) === "my computer") {
     let dateLimit: ParsedDatesUNIX | null = null;
     if (dateLimitUNIX) { dateLimit = dateLimitUNIX; }
     let parsedDates = extractDate(query);
-    console.log("parsed dates:", parsedDates);
     
     if (dateLimitUNIX && dateLimitUNIX.start !== "" && dateLimitUNIX.end !== "") {
       if (parsedDates && parsedDates.start === dateLimitUNIX.start && parsedDates.end === dateLimitUNIX.end) {
-        console.log("Dates are the same");
         dateLimit = dateLimitUNIX;
         query = dateLimit.text;
       } else if (parsedDates) {
-        console.log("Dates are different");
         dateLimit = parsedDates;
         query = dateLimit.text;
       }
@@ -60,13 +78,15 @@ export async function searchDocuments(query:string, page:number, limit:number, t
   } else if (get(locationShown) === "browser history") {
     results = await invoke("run_browser_history_search", { userProfile: "Default", userQuery: query, limit: limit, page: page});
   }
+  searchCache.set(cacheKey, { results, timestamp: Date.now() });
   return results;
 }
 
 export async function triggerSearch() {
-  resultsPageShown.set(0); // reset the page number on each new search
+  resultsPageShown.set(0); // reset page number
+  noMoreResults.set(false); // CRITICAL: Reset end-of-results flag for new search
   searchInProgress.set(true);
-  base64Images.set([]);
+  clearBase64Images();
   trackEvent('search-triggered', {
     filetypeShown: get(filetypeShown),
     resultsPageShown: get(resultsPageShown)
@@ -76,48 +96,63 @@ export async function triggerSearch() {
     filetypeToGet = setExtensionCategory(get(filetypeShown), get(allowedExtensions));
   }
   
-  let result = await searchDocuments(
-    get(searchQuery),
-    get(resultsPageShown),
-    get(resultsPerPage),
-    filetypeToGet,
-    get(dateLimitUNIX)
-  );
-  documentsShown.set(result); 
-  if (get(showIconGrid)) {
-    console.log(">> triggersearch");
-    await getResultThumbnails(get(documentsShown));
+  try {
+    let result = await searchDocuments(
+      get(searchQuery),
+      0,
+      get(resultsPerPage),
+      filetypeToGet,
+      get(dateLimitUNIX)
+    );
+    documentsShown.set(result);
+    if (result.length < get(resultsPerPage)) {
+      noMoreResults.set(true);
+    }
+    if (get(showIconGrid)) {
+      await getResultThumbnails(get(documentsShown));
+    }
+  } catch (e) {
+    console.error("Error during triggerSearch:", e);
+  } finally {
+    searchInProgress.set(false);
   }
-  searchInProgress.set(false);
 }
 
 export async function loadMoreResults() {
-  // Same function as triggerSearch, but with a different page number and appending results
-  console.log("Loading more results...");
-  resultsPageShown.set(get(resultsPageShown) + 1); // increment the page number on each new search
+  if (get(noMoreResults) || get(searchInProgress)) return;
+  
+  const nextPage = get(resultsPageShown) + 1;
+  resultsPageShown.set(nextPage);
   searchInProgress.set(true);
   trackEvent('loadMoreResults', {
     filetypeShown: get(filetypeShown),
-    resultsPageShown: get(resultsPageShown)
+    resultsPageShown: nextPage
   });
   let filetypeToGet = get(filetypeShown);
   if (filetypeToGet !== 'any') {
     filetypeToGet = setExtensionCategory(get(filetypeShown), get(allowedExtensions));
   }
-  let results = await searchDocuments(
-    get(searchQuery),
-    get(resultsPageShown),
-    get(resultsPerPage),
-    filetypeToGet,
-  );
-  if (results.length === 0) {
-    noMoreResults.set(true);
-  } else {
-    documentsShown.set([...get(documentsShown), ...results]);
+  try {
+    let results = await searchDocuments(
+      get(searchQuery),
+      nextPage,
+      get(resultsPerPage),
+      filetypeToGet,
+    );
+    if (!results || results.length === 0) {
+      noMoreResults.set(true);
+    } else {
+      if (results.length < get(resultsPerPage)) {
+        noMoreResults.set(true);
+      }
+      documentsShown.set([...get(documentsShown), ...results]);
+      if (get(showIconGrid)) {
+        await getResultThumbnails(results);
+      }
+    }
+  } catch (e) {
+    console.error("Error during loadMoreResults:", e);
+  } finally {
+    searchInProgress.set(false);
   }
-  if (get(showIconGrid)) {
-    console.log(">> loadmoreresults");
-    await getResultThumbnails(get(documentsShown));
-  }
-  searchInProgress.set(false);
 }

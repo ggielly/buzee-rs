@@ -25,6 +25,8 @@ pub struct UserPrefs {
     pub manual_setup: bool,
     pub enable_logs: bool,
     pub pdf_max_ocr_pages: i64,
+    pub ocr_threads: i64,
+    pub ocr_sort_order: String,
 }
 
 // This struct is for CRUD on the app_data table

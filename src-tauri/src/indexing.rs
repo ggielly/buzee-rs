@@ -1,4 +1,5 @@
-use crate::custom_types::{IgnoreAllowCacheState, TantivyDocumentItem};
+use crate::custom_types::{IgnoreAllowCacheState, OcrFailedFile, OcrRescanProgress, OcrRescanState, OcrSuccessFile, TantivyDocumentItem};
+use crate::database::establish_connection;
 use crate::database::models::{AllowList, BodyItem, DocumentItem, FileTypes, IgnoreList};
 use crate::database::schema::{
     allow_list, body, document, file_types, ignore_list, metadata, metadata_fts,
@@ -7,10 +8,11 @@ use crate::db_sync::sync_status;
 use crate::ipc::send_message_to_frontend;
 use crate::tantivy_index;
 use crate::text_extraction::Extractor;
-use crate::user_prefs::return_user_prefs_state;
+use crate::user_prefs::{return_user_prefs_state, set_scan_running_status};
 use crate::utils::{self, get_metadata};
 use diesel::connection::Connection;
-use diesel::{ExpressionMethods, JoinOnDsl, QueryDsl, RunQueryDsl, SqliteConnection};
+use diesel::{BoolExpressionMethods, ExpressionMethods, JoinOnDsl, QueryDsl, RunQueryDsl, SqliteConnection};
+use futures::{pin_mut, StreamExt};
 use ignore::{Walk, WalkBuilder};
 use std::collections::HashSet;
 use std::path::Path;
@@ -269,14 +271,7 @@ pub fn walk_directory(
 
             // if user is running a manual_setup, then skip all files that are not in allowed_files or allowed_folders
             if user_preferences.manual_setup {
-                if !ignore_allow_cache
-                    .allowed_file_paths
-                    .contains(&file_item.path)
-                    && !ignore_allow_cache
-                        .allowed_folder_prefixes
-                        .iter()
-                        .any(|prefix| file_item.path.starts_with(prefix))
-                {
+                if !ignore_allow_cache.is_allowed(&file_item.path) {
                     // skip this file
                     continue;
                 }
@@ -760,6 +755,408 @@ pub async fn parse_content_from_files(
     files_parsed
 }
 
+/// Commit a batch of parsed bodies to the Tantivy index and the `body` table,
+/// then reset the in-memory vectors. Shared by the normal scan and the OCR
+/// rescan so both keep the same batching behaviour.
+fn commit_index_batch(
+    app: &tauri::AppHandle,
+    conn: &mut SqliteConnection,
+    body_tantivy_items: &mut Vec<TantivyDocumentItem>,
+    body_tantivy_source_ids: &mut Vec<i32>,
+    body_items: &mut Vec<BodyItem>,
+) {
+    let indexing_commit_response =
+        tantivy_index::delete_and_add_docs_to_index(app, body_tantivy_source_ids, body_tantivy_items);
+    if indexing_commit_response.is_err() {
+        log::error!(
+            "Error updating Tantivy Index: {:?}",
+            indexing_commit_response
+        );
+    }
+    add_body_to_database(body_items, conn);
+    update_last_parsed_in_document_table(conn, body_tantivy_source_ids.clone());
+    body_tantivy_items.clear();
+    body_tantivy_source_ids.clear();
+    body_items.clear();
+}
+
+/// Emit a rich OCR rescan progress payload to the frontend as a JSON string in
+/// the `data` field of an "ocr-rescan-progress" event.
+fn emit_ocr_rescan_progress(
+    window: &tauri::WebviewWindow,
+    message: &str,
+    total: usize,
+    processed: usize,
+    success: usize,
+    failed: usize,
+    threads: i64,
+    current_file: &str,
+    failed_files: &[OcrFailedFile],
+    success_files: &[OcrSuccessFile],
+) {
+    let payload = OcrRescanProgress {
+        message: message.to_string(),
+        total,
+        processed,
+        success,
+        failed,
+        remaining: total.saturating_sub(processed),
+        threads,
+        current_file: current_file.to_string(),
+        failed_files: failed_files.to_vec(),
+        success_files: success_files.to_vec(),
+    };
+    let data = match serde_json::to_string(&payload) {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("Failed to serialise OCR rescan progress: {}", e);
+            return;
+        }
+    };
+    send_message_to_frontend(window, "ocr-rescan-progress".to_string(), message.to_string(), data);
+}
+
+/// Shared OCR rescan engine. Runs extraction on the given candidates with a
+/// bounded worker pool, streams progress to the frontend, records failures and
+/// (unlike a normal scan) re-processes already-parsed files.
+///
+/// Returns `true` when all candidates were processed, `false` when cancelled.
+async fn run_ocr_rescan(
+    app: &tauri::AppHandle,
+    window: &tauri::WebviewWindow,
+    all_files_data: Vec<(
+        i32, i32, String, String, String, String, i64, i64, Option<String>, Option<f64>,
+    )>,
+    threads: i64,
+) -> bool {
+    let total_to_parse = all_files_data.len();
+    log::info!("OCR rescan: {} files to process", total_to_parse);
+
+    let mut conn = establish_connection(app);
+    let concurrency = threads.clamp(1, 4) as usize;
+
+    // Emit an initial progress message so the frontend can show a determinate bar.
+    emit_ocr_rescan_progress(window, "started", total_to_parse, 0, 0, 0, threads, "", &[], &[]);
+    // Also emit the legacy scan_started event so the status bar's parsing bar
+    // knows the total before the first scan_progress arrives.
+    send_message_to_frontend(
+        window,
+        "scan-progress".to_string(),
+        "scan_started".to_string(),
+        format!("{}", total_to_parse),
+    );
+
+    let mut body_items: Vec<BodyItem> = vec![];
+    let mut body_tantivy_items: Vec<TantivyDocumentItem> = vec![];
+    let mut body_tantivy_source_ids: Vec<i32> = vec![];
+    const BATCH_CUTOFF: usize = 500;
+    let mut files_parsed = 0usize;
+    let mut files_success = 0usize;
+    let mut failed_files: Vec<OcrFailedFile> = vec![];
+    let mut success_files: Vec<OcrSuccessFile> = vec![];
+    let mut completed = true;
+
+    // Extract text with bounded concurrency. Each in-flight task checks the
+    // cancellation flag and the file integrity before starting so a stopped
+    // rescan does not kick off new extractions (tasks already running are
+    // allowed to finish, like the existing per-PDF OCR timeout).
+    let stream = futures::stream::iter(all_files_data.into_iter().map(|item| {
+        let app = app.clone();
+        async move {
+            let cancelled = app
+                .state::<Mutex<OcrRescanState>>()
+                .lock()
+                .unwrap()
+                .cancelled
+                .load(std::sync::atomic::Ordering::SeqCst);
+            let (text, error) = if cancelled {
+                (String::new(), Some("Rescan cancelled".to_string()))
+            } else if let Err(reason) = validate_file_for_ocr(&item.4, &item.5) {
+                (String::new(), Some(reason))
+            } else {
+                extract_text_from_path_with_error(item.4.clone(), item.5.clone(), &app).await
+            };
+            (item, text, error)
+        }
+    }))
+    .buffer_unordered(concurrency);
+    pin_mut!(stream);
+
+    // Store a copy of the handle so the inner futures can mutate state safely;
+    // we read back failed files at the end.
+    let state = app.state::<Mutex<OcrRescanState>>();
+
+    while let Some((file_item, text, error)) = stream.next().await {
+        // Bail out as soon as a stop was requested or the background scan was
+        // turned off (e.g. via the status-bar stop button).
+        if state.lock().unwrap().cancelled.load(std::sync::atomic::Ordering::SeqCst) || sync_status(app).0 == "false" {
+            completed = false;
+            break;
+        }
+
+        let metadata_id = file_item.0;
+        let source_id = file_item.1;
+        let source_domain = file_item.2;
+        let name = file_item.3.clone();
+        let path = file_item.4.clone();
+        let file_type = file_item.5.clone();
+        let last_modified = file_item.6;
+        let comment = file_item.8;
+
+        // A non-empty extracted text is a success. Empty text with no error can
+        // legitimately happen (e.g. a dummy image), but after OCR we treat it as
+        // a soft failure so the user can retry it from the dialog.
+        let is_success = error.is_none() && !text.trim().is_empty();
+        if is_success {
+            files_success += 1;
+            success_files.push(OcrSuccessFile {
+                path: path.clone(),
+                name: name.clone(),
+            });
+        } else {
+            let why = error.unwrap_or_else(|| "No text was extracted".to_string());
+            failed_files.push(OcrFailedFile {
+                path: path.clone(),
+                name: name.clone(),
+                error: why,
+            });
+        }
+
+        // Keep the shared state in sync so the frontend can pull the current
+        // lists at any moment (e.g. when the user expands a list mid-run).
+        {
+            let state = state.lock().unwrap();
+            *state.failed_files.lock().unwrap() = failed_files.clone();
+            *state.success_files.lock().unwrap() = success_files.clone();
+        }
+
+        if is_success {
+            for chunk in chunk_text(text) {
+                body_tantivy_items.push(TantivyDocumentItem {
+                    source_id: i64::from(source_id),
+                    source_table: "document".to_string(),
+                    source_domain: source_domain.clone(),
+                    name: name.clone(),
+                    url: path.clone(),
+                    body: chunk.clone(),
+                    file_type: file_type.clone(),
+                    last_modified: i64::from(last_modified),
+                    comment: comment.clone().unwrap_or_default(),
+                });
+                body_items.push(BodyItem {
+                    metadata_id,
+                    source_id,
+                    text: chunk,
+                    last_parsed: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs() as i64,
+                });
+            }
+
+            body_tantivy_source_ids.push(source_id);
+        }
+
+        files_parsed += 1;
+
+        // Stream rich progress after every file so the current file, remaining
+        // count and error tally stay live in the dialog. The current file is the
+        // full path so the dialog can show exactly which file is being OCR-ed.
+        // The full file lists are NOT re-sent here (they can be huge); the
+        // frontend fetches them on demand via the getter commands, which now
+        // read the incrementally-updated state.
+        emit_ocr_rescan_progress(
+            window,
+            "progress",
+            total_to_parse,
+            files_parsed,
+            files_success,
+            failed_files.len(),
+            threads,
+            &path,
+            &[],
+            &[],
+        );
+        // Also emit the legacy scan-progress event so the status bar stays in sync.
+        if files_parsed % 50 == 0 {
+            send_message_to_frontend(
+                window,
+                "scan-progress".to_string(),
+                "scan_progress".to_string(),
+                format!("{}/{}", files_parsed, total_to_parse),
+            );
+            log::info!("OCR rescan: {} files parsed", files_parsed);
+        }
+
+        if body_tantivy_items.len() >= BATCH_CUTOFF {
+            commit_index_batch(
+                app,
+                &mut conn,
+                &mut body_tantivy_items,
+                &mut body_tantivy_source_ids,
+                &mut body_items,
+            );
+        }
+    }
+
+    // Flush any remaining files.
+    if !body_tantivy_items.is_empty() {
+        commit_index_batch(
+            app,
+            &mut conn,
+            &mut body_tantivy_items,
+            &mut body_tantivy_source_ids,
+            &mut body_items,
+        );
+    }
+
+    // Save the failed and success files so they can be retried/listed from the
+    // dialog after the run.
+    {
+        let state = state.lock().unwrap();
+        let mut stored = state.failed_files.lock().unwrap();
+        *stored = failed_files.clone();
+        let mut stored_success = state.success_files.lock().unwrap();
+        *stored_success = success_files.clone();
+    }
+
+    // Final progress message, clear the "scan running" flag and notify the
+    // frontend that the rescan finished (completed or cancelled).
+    send_message_to_frontend(
+        window,
+        "scan-progress".to_string(),
+        "scan_progress".to_string(),
+        format!("{}/{}", files_parsed, total_to_parse),
+    );
+    set_scan_running_status(&mut conn, false, true, app);
+    emit_ocr_rescan_progress(
+        window,
+        if completed { "finished" } else { "cancelled" },
+        total_to_parse,
+        files_parsed,
+        files_success,
+        failed_files.len(),
+        threads,
+        "",
+        &failed_files,
+        &success_files,
+    );
+
+    completed
+}
+
+/// OCR-only rescan of every PDF and image already present in the database.
+///
+/// Unlike a regular scan this ignores `last_parsed`, so already-OCR-ed files are
+/// re-processed (useful after changing OCR settings). Extraction is parallelised
+/// up to `threads` concurrent workers, progress is streamed to the frontend and
+/// the run can be cancelled via `OcrRescanState`.
+///
+/// Returns `true` when all candidates were processed, `false` when cancelled.
+pub async fn rescan_ocr_documents(
+    app: &tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    sort_order: String,
+    threads: i64,
+) -> bool {
+    const IMAGE_FILETYPES: [&str; 6] = ["png", "jpeg", "jpg", "bmp", "tif", "tiff"];
+    const IMAGE_CUTOFF_SIZE: f64 = 50_000.0;
+
+    let mut conn = establish_connection(app);
+
+    // Candidates: every PDF plus every image above the size cutoff (mirrors the
+    // eligibility rules of parse_content_from_files). Ordered per the selected
+    // sort preference.
+    let all_files_data: Vec<(
+        i32, i32, String, String, String, String, i64, i64, Option<String>, Option<f64>,
+    )> = {
+        let mut query = document::table
+            .inner_join(metadata::table.on(document::id.eq(metadata::source_id)))
+            .filter(
+                document::file_type
+                    .eq("pdf")
+                    .or(document::file_type
+                        .eq_any(IMAGE_FILETYPES)
+                        .and(document::size.gt(IMAGE_CUTOFF_SIZE))),
+            )
+            .select((
+                metadata::id,
+                document::id,
+                document::source_domain,
+                document::name,
+                document::path,
+                document::file_type,
+                document::last_modified,
+                document::last_parsed,
+                document::comment,
+                document::size,
+            ))
+            .into_boxed();
+
+        query = match sort_order.as_str() {
+            "size_desc" => query.order_by(document::size.desc()),
+            "name_asc" => query.order_by(document::name.asc()),
+            "name_desc" => query.order_by(document::name.desc()),
+            "modified_desc" => query.order_by(document::last_modified.desc()),
+            "modified_asc" => query.order_by(document::last_modified.asc()),
+            "opened_desc" => query.order_by(document::last_opened.desc()),
+            "opened_asc" => query.order_by(document::last_opened.asc()),
+            _ => query.order_by(document::size.asc()),
+        };
+
+        query.load(&mut conn).unwrap_or_default()
+    };
+
+    run_ocr_rescan(app, &window, all_files_data, threads).await
+}
+
+/// Re-run OCR on a specific set of files (used to retry the files that failed a
+/// previous rescan). Returns `true` when all given files were processed.
+pub async fn rescan_ocr_files(
+    app: &tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    paths: Vec<String>,
+    threads: i64,
+) -> bool {
+    if paths.is_empty() {
+        return true;
+    }
+
+    const IMAGE_FILETYPES: [&str; 6] = ["png", "jpeg", "jpg", "bmp", "tif", "tiff"];
+    const IMAGE_CUTOFF_SIZE: f64 = 50_000.0;
+
+    let mut conn = establish_connection(app);
+
+    let all_files_data: Vec<(
+        i32, i32, String, String, String, String, i64, i64, Option<String>, Option<f64>,
+    )> = document::table
+        .inner_join(metadata::table.on(document::id.eq(metadata::source_id)))
+        .filter(document::path.eq_any(&paths))
+        .filter(
+            document::file_type
+                .eq("pdf")
+                .or(document::file_type
+                    .eq_any(IMAGE_FILETYPES)
+                    .and(document::size.gt(IMAGE_CUTOFF_SIZE))),
+        )
+        .select((
+            metadata::id,
+            document::id,
+            document::source_domain,
+            document::name,
+            document::path,
+            document::file_type,
+            document::last_modified,
+            document::last_parsed,
+            document::comment,
+            document::size,
+        ))
+        .load(&mut conn)
+        .unwrap_or_default();
+
+    run_ocr_rescan(app, &window, all_files_data, threads).await
+}
+
 fn add_body_to_database(body_items: &Vec<BodyItem>, connection: &mut SqliteConnection) {
     if body_items.is_empty() {
         return;
@@ -802,7 +1199,12 @@ fn add_body_to_database(body_items: &Vec<BodyItem>, connection: &mut SqliteConne
         .transaction::<_, diesel::result::Error, _>(|connection| {
             for item in existing_body_items {
                 diesel::update(body::table.filter(body::metadata_id.eq(item.metadata_id)))
-                    .set(body::last_parsed.eq(item.last_parsed))
+                    // Refresh BOTH the full text and last_parsed so a re-OCR of an
+                    // already-indexed file actually replaces its stored body text.
+                    .set((
+                        body::text.eq(&item.text),
+                        body::last_parsed.eq(item.last_parsed),
+                    ))
                     .execute(connection)
                     .unwrap();
             }
@@ -843,6 +1245,70 @@ pub async fn extract_text_from_path(
             String::new()
         }
     }
+}
+
+/// Like `extract_text_from_path` but keeps the error message so callers (e.g. the
+/// OCR rescan) can report *why* a file failed instead of just seeing empty text.
+pub async fn extract_text_from_path_with_error(
+    path: String,
+    file_type: String,
+    app: &tauri::AppHandle,
+) -> (String, Option<String>) {
+    let extractor: Extractor = Extractor::new();
+    let extracted_text = extractor.extract_text_from_file(path, file_type, app).await;
+    match extracted_text {
+        Ok(text) => (text, None),
+        Err(e) => {
+            log::error!("Error extracting text: {}", e);
+            (String::new(), Some(e.to_string()))
+        }
+    }
+}
+
+/// Cheap sanity check that a file is readable and does not look corrupt before we
+/// spend time running OCR on it. Checks existence, non-zero size and (for the
+/// formats Buzee OCRs) a magic-bytes signature match. Returns `Ok` when the file
+/// looks fine, or a human-readable reason why it should be skipped.
+fn validate_file_for_ocr(path: &str, file_type: &str) -> Result<(), String> {
+    use std::io::Read;
+
+    let metadata = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) => return Err(format!("File not accessible: {}", e)),
+    };
+    if !metadata.is_file() {
+        return Err("Not a regular file".to_string());
+    }
+    if metadata.len() == 0 {
+        return Err("File is empty".to_string());
+    }
+
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) => return Err(format!("Cannot open file: {}", e)),
+    };
+    let mut header = [0u8; 8];
+    let read = file.read(&mut header).unwrap_or(0);
+
+    // Expected magic bytes per file type. The matching is deliberately forgiving
+    // (e.g. no BOM handling) — it only guards against clearly wrong/garbage files.
+    let expected: &[u8] = match file_type {
+        "pdf" => b"%PDF",
+        "png" => &[0x89, 0x50, 0x4E, 0x47],
+        "jpeg" | "jpg" => &[0xFF, 0xD8],
+        "bmp" => b"BM",
+        "tif" | "tiff" => b"II",
+        _ => &[],
+    };
+
+    if !expected.is_empty() && (read < expected.len() || &header[..expected.len()] != expected) {
+        return Err(format!(
+            "File signature does not match a '{}' file (likely corrupt or renamed)",
+            file_type
+        ));
+    }
+
+    Ok(())
 }
 
 fn chunk_text(text: String) -> Vec<String> {
@@ -908,45 +1374,17 @@ pub fn remove_nonexistent_and_ignored_files(conn: &mut SqliteConnection, app: &t
                 continue;
             }
         }
-        // if path is in the allowed_files list, skip removal
-        if ignore_allow_cache.allowed_file_paths.contains(path) {
-            continue;
-        }
-        // if path starts with an allowed folder, skip removal
-        if ignore_allow_cache
-            .allowed_folder_prefixes
-            .iter()
-            .any(|prefix| path.starts_with(prefix))
-        {
+        // if path is in the allowed_files list (or under an allowed folder), skip removal
+        if ignore_allow_cache.is_allowed(path) {
             continue;
         }
         // if path is in ignored_files with ignore_indexing=true, remove from DB
-        if ignore_allow_cache.ignored_file_paths.contains(path) {
+        if ignore_allow_cache.is_ignored(path) {
             files_to_remove.push(path.clone());
             continue;
         }
         // if path is in ignored_files with ignore_indexing=false, remove from index only
-        if ignore_allow_cache
-            .ignored_indexonly_file_paths
-            .contains(path)
-        {
-            files_to_remove_from_index_only.push(path.clone());
-            continue;
-        }
-        // if path starts with an ignored folder, check ignore_indexing flag
-        if ignore_allow_cache
-            .ignored_folder_prefixes
-            .iter()
-            .any(|prefix| path.starts_with(prefix))
-        {
-            files_to_remove.push(path.clone());
-            continue;
-        }
-        if ignore_allow_cache
-            .ignored_indexonly_folder_prefixes
-            .iter()
-            .any(|prefix| path.starts_with(prefix))
-        {
+        if ignore_allow_cache.is_ignored_index_only(path) {
             files_to_remove_from_index_only.push(path.clone());
             continue;
         }

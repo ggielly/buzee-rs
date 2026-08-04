@@ -78,19 +78,19 @@ pub async fn extract_text_from_pdf(file_path: String, conn: &mut SqliteConnectio
 }
 
 pub async fn save_text_to_file(file_path: String, text: String) {
-  let mut file = fs::File::create(file_path).unwrap();
-  file.write_all(text.as_bytes()).unwrap();
+  if let Err(e) = fs::File::create(&file_path).and_then(|mut f| f.write_all(text.as_bytes())) {
+    log::error!("Failed to save text to {}: {}", file_path, e);
+  }
 }
 
 pub async fn read_text_from_file(file_path: String) -> Result<String, Error> {
   // Reads text from a given .txt file path
-  let text = fs::read_to_string(file_path).unwrap();
-  Ok(text)
+  Ok(fs::read_to_string(file_path)?)
 }
 
 pub async fn read_image_to_base64(file_path: String) -> Result<String, Error> {
   use base64::prelude::*;
-  let image = fs::read(file_path).unwrap();
+  let image = fs::read(file_path)?;
   let base64_image = BASE64_STANDARD.encode(&image);
   Ok(base64_image)
 }

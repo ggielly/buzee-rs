@@ -13,6 +13,12 @@ impl Error {
   }
 }
 
+impl From<diesel::result::Error> for Error {
+  fn from(e: diesel::result::Error) -> Self {
+    Self::new(&e.to_string())
+  }
+}
+
 // we must manually implement serde::Serialize
 impl serde::Serialize for Error {
   fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -224,17 +230,50 @@ impl Default for SyncRunningState {
   }
 }
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+
+/// A prefix trie over raw bytes. Folder-prefix matching (`path.starts_with(p)`)
+/// is O(path length) instead of a linear scan over every folder in the list.
+#[derive(Default)]
+pub(crate) struct PrefixSet {
+  children: HashMap<u8, Box<PrefixSet>>,
+  is_terminal: bool,
+}
+
+impl PrefixSet {
+  pub fn insert(&mut self, s: &str) {
+    let mut node = self;
+    for b in s.as_bytes() {
+      node = node.children.entry(*b).or_default();
+    }
+    node.is_terminal = true;
+  }
+
+  /// Returns true if any inserted string is a prefix of `path`.
+  pub fn contains_prefix_of(&self, path: &str) -> bool {
+    let mut node = self;
+    for b in path.as_bytes() {
+      if node.is_terminal {
+        return true;
+      }
+      match node.children.get(b) {
+        Some(next) => node = next,
+        None => return false,
+      }
+    }
+    node.is_terminal
+  }
+}
 
 /// Cached allow/ignore lists to avoid re-querying the DB on every file during scan.
 #[derive(Default)]
 pub(crate) struct IgnoreAllowCacheState {
   pub ignored_file_paths: HashSet<String>,
-  pub ignored_folder_prefixes: Vec<String>,
+  pub ignored_folder_prefixes: PrefixSet,
   pub ignored_indexonly_file_paths: HashSet<String>,
-  pub ignored_indexonly_folder_prefixes: Vec<String>,
+  pub ignored_indexonly_folder_prefixes: PrefixSet,
   pub allowed_file_paths: HashSet<String>,
-  pub allowed_folder_prefixes: Vec<String>,
+  pub allowed_folder_prefixes: PrefixSet,
 }
 
 impl IgnoreAllowCacheState {
@@ -245,18 +284,18 @@ impl IgnoreAllowCacheState {
     let allowed_items = get_all_allowed_paths(conn);
 
     let mut ignored_file_paths = HashSet::new();
-    let mut ignored_folder_prefixes = Vec::new();
+    let mut ignored_folder_prefixes = PrefixSet::default();
     let mut ignored_indexonly_file_paths = HashSet::new();
-    let mut ignored_indexonly_folder_prefixes = Vec::new();
+    let mut ignored_indexonly_folder_prefixes = PrefixSet::default();
     let mut allowed_file_paths = HashSet::new();
-    let mut allowed_folder_prefixes = Vec::new();
+    let mut allowed_folder_prefixes = PrefixSet::default();
 
     for item in &ignored_items {
       if item.is_folder {
         if item.ignore_indexing {
-          ignored_folder_prefixes.push(item.path.clone());
+          ignored_folder_prefixes.insert(&item.path);
         } else {
-          ignored_indexonly_folder_prefixes.push(item.path.clone());
+          ignored_indexonly_folder_prefixes.insert(&item.path);
         }
       } else {
         if item.ignore_indexing {
@@ -269,16 +308,11 @@ impl IgnoreAllowCacheState {
 
     for item in &allowed_items {
       if item.is_folder {
-        allowed_folder_prefixes.push(item.path.clone());
+        allowed_folder_prefixes.insert(&item.path);
       } else {
         allowed_file_paths.insert(item.path.clone());
       }
     }
-
-    // Sort folder prefixes by length descending so longer (more specific) paths match first
-    ignored_folder_prefixes.sort_by(|a, b| b.len().cmp(&a.len()));
-    ignored_indexonly_folder_prefixes.sort_by(|a, b| b.len().cmp(&a.len()));
-    allowed_folder_prefixes.sort_by(|a, b| b.len().cmp(&a.len()));
 
     Self {
       ignored_file_paths,
@@ -290,40 +324,32 @@ impl IgnoreAllowCacheState {
     }
   }
 
+  /// Returns true if the path is explicitly allowed (exact file or under an allowed folder).
+  pub fn is_allowed(&self, path: &str) -> bool {
+    self.allowed_file_paths.contains(path)
+      || self.allowed_folder_prefixes.contains_prefix_of(path)
+  }
+
+  /// Returns true if the path is ignored with `ignore_indexing` (fully excluded).
+  pub fn is_ignored(&self, path: &str) -> bool {
+    self.ignored_file_paths.contains(path)
+      || self.ignored_folder_prefixes.contains_prefix_of(path)
+  }
+
+  /// Returns true if the path is ignored with `ignore_indexing == false` (index-only removal).
+  pub fn is_ignored_index_only(&self, path: &str) -> bool {
+    self.ignored_indexonly_file_paths.contains(path)
+      || self.ignored_indexonly_folder_prefixes.contains_prefix_of(path)
+  }
+
   /// Returns true if the path should be skipped (ignored, not overridden by allow list).
   pub fn should_skip(&self, path: &str) -> bool {
     // If explicitly allowed, never skip
-    if self.allowed_file_paths.contains(path) {
-      return false;
-    }
-    if self.allowed_folder_prefixes.iter().any(|prefix| path.starts_with(prefix)) {
+    if self.is_allowed(path) {
       return false;
     }
     // If in ignore list with ignore_indexing=true, skip
-    if self.ignored_file_paths.contains(path) {
-      return true;
-    }
-    if self.ignored_folder_prefixes.iter().any(|prefix| path.starts_with(prefix)) {
-      return true;
-    }
-    false
-  }
-
-  /// Returns true if the path should be removed from index only (ignored but not fully).
-  pub fn should_remove_index_only(&self, path: &str) -> bool {
-    if self.allowed_file_paths.contains(path) {
-      return false;
-    }
-    if self.allowed_folder_prefixes.iter().any(|prefix| path.starts_with(prefix)) {
-      return false;
-    }
-    if self.ignored_indexonly_file_paths.contains(path) {
-      return true;
-    }
-    if self.ignored_indexonly_folder_prefixes.iter().any(|prefix| path.starts_with(prefix)) {
-      return true;
-    }
-    false
+    self.is_ignored(path)
   }
 }
 
@@ -449,6 +475,8 @@ pub(crate) struct UserPreferencesState {
   pub manual_setup: bool,
   pub enable_logs: bool,
   pub pdf_max_ocr_pages: i64,
+  pub ocr_threads: i64,
+  pub ocr_sort_order: String,
 }
 
 impl Default for UserPreferencesState {
@@ -468,8 +496,62 @@ impl Default for UserPreferencesState {
           manual_setup: false,
           enable_logs: false,
           pdf_max_ocr_pages: 150,
+          ocr_threads: 1,
+          ocr_sort_order: "size_asc".to_string(),
         }
     }
+}
+
+// A single file whose OCR extraction failed during a rescan.
+#[derive(Clone, Serialize, Debug)]
+pub(crate) struct OcrFailedFile {
+  pub path: String,
+  pub name: String,
+  pub error: String,
+}
+
+// A single file whose OCR extraction succeeded during a rescan.
+#[derive(Clone, Serialize, Debug)]
+pub(crate) struct OcrSuccessFile {
+  pub path: String,
+  pub name: String,
+}
+
+// Rich progress payload streamed to the frontend during an OCR rescan. Serialized
+// to JSON and sent as the `data` string of an "ocr-rescan-progress" event.
+#[derive(Clone, Serialize, Debug)]
+pub(crate) struct OcrRescanProgress {
+  pub message: String, // "started" | "progress" | "finished"
+  pub total: usize,
+  pub processed: usize,
+  pub success: usize,
+  pub failed: usize,
+  pub remaining: usize,
+  pub threads: i64,
+  pub current_file: String,
+  pub failed_files: Vec<OcrFailedFile>,
+  pub success_files: Vec<OcrSuccessFile>,
+}
+
+// Tracks the on-demand OCR rescan (triggered from the settings page) so the
+// frontend can stop it and tell whether one is already in flight. Failed files
+// are kept so they can be retried after the rescan has finished.
+pub(crate) struct OcrRescanState {
+  pub running: std::sync::atomic::AtomicBool,
+  pub cancelled: std::sync::atomic::AtomicBool,
+  pub failed_files: std::sync::Mutex<Vec<OcrFailedFile>>,
+  pub success_files: std::sync::Mutex<Vec<OcrSuccessFile>>,
+}
+
+impl OcrRescanState {
+  pub fn new() -> Self {
+    Self {
+      running: std::sync::atomic::AtomicBool::new(false),
+      cancelled: std::sync::atomic::AtomicBool::new(false),
+      failed_files: std::sync::Mutex::new(vec![]),
+      success_files: std::sync::Mutex::new(vec![]),
+    }
+  }
 }
 
 use tauri::Wry;

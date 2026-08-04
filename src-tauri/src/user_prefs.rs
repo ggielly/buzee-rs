@@ -31,6 +31,8 @@ pub fn set_default_user_prefs(conn: &mut SqliteConnection, reset_settings_flag: 
         user_preferences::manual_setup.eq(false),
         user_preferences::enable_logs.eq(false),
         user_preferences::pdf_max_ocr_pages.eq(150),
+        user_preferences::ocr_threads.eq(1),
+        user_preferences::ocr_sort_order.eq("size_asc"),
       ))
       .execute(conn)
       .unwrap();
@@ -58,6 +60,8 @@ pub fn set_default_user_prefs(conn: &mut SqliteConnection, reset_settings_flag: 
       manual_setup: false,
       enable_logs: false,
       pdf_max_ocr_pages: 150,
+      ocr_threads: 1,
+      ocr_sort_order: "size_asc".to_string(),
     };
     // insert new_user_prefs into the user_prefs table
     diesel::insert_into(user_preferences::table)
@@ -229,7 +233,9 @@ pub fn set_user_preferences_state_from_db_value(app: &tauri::AppHandle) {
       user_preferences::parse_pdfs,
       user_preferences::manual_setup,
       user_preferences::enable_logs,
-      user_preferences::pdf_max_ocr_pages
+      user_preferences::pdf_max_ocr_pages,
+      user_preferences::ocr_threads,
+      user_preferences::ocr_sort_order
     ))
     .first::<UserPrefs>(&mut conn)
     .expect("Error loading user_prefs");
@@ -249,6 +255,8 @@ pub fn set_user_preferences_state_from_db_value(app: &tauri::AppHandle) {
   state.manual_setup = user_preferences_from_db.manual_setup;
   state.enable_logs = user_preferences_from_db.enable_logs;
   state.pdf_max_ocr_pages = user_preferences_from_db.pdf_max_ocr_pages;
+  state.ocr_threads = user_preferences_from_db.ocr_threads;
+  state.ocr_sort_order = user_preferences_from_db.ocr_sort_order;
 }
 
 pub fn fix_global_shortcut_string(new_shortcut_string: String) -> String {
@@ -365,6 +373,30 @@ pub fn set_pdf_max_ocr_pages_in_db(pages: i64, app: &tauri::AppHandle) {
   let mut conn = establish_connection(&app);
   let _ = diesel::update(user_preferences::table)
     .set(user_preferences::pdf_max_ocr_pages.eq(pages))
+    .execute(&mut conn)
+    .unwrap();
+}
+
+pub fn get_ocr_threads(app: &tauri::AppHandle) -> i64 {
+  return_user_prefs_state(app).ocr_threads.clamp(1, 4)
+}
+
+pub fn get_ocr_sort_order(app: &tauri::AppHandle) -> String {
+  return_user_prefs_state(app).ocr_sort_order
+}
+
+pub fn set_ocr_threads_in_db(threads: i64, app: &tauri::AppHandle) {
+  let mut conn = establish_connection(&app);
+  let _ = diesel::update(user_preferences::table)
+    .set(user_preferences::ocr_threads.eq(threads))
+    .execute(&mut conn)
+    .unwrap();
+}
+
+pub fn set_ocr_sort_order_in_db(order: String, app: &tauri::AppHandle) {
+  let mut conn = establish_connection(&app);
+  let _ = diesel::update(user_preferences::table)
+    .set(user_preferences::ocr_sort_order.eq(order))
     .execute(&mut conn)
     .unwrap();
 }

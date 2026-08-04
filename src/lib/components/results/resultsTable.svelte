@@ -3,24 +3,15 @@
 	import { documentsShown, preferLastOpened } from '$lib/stores';
 	import { goto } from '$app/navigation';
 
-	// onMount(async () => {
-	// 	if (document) {
-	// 		document.body.style.overflow = 'hidden';
-	// 	}
-	// });
-
-	// onDestroy(async () => {
-	// 	if (document) {
-	// 		document.body.style.overflow = 'auto';
-	// 	}
-	// });
+	// The scrollable container for the results list. Both the table view and the
+	// icon-grid view live inside it; the table virtualizer observes it.
+	let scrollElement: HTMLElement | null = null;
 </script>
 
-<!-- {#key $documentsShown || $preferLastOpened} -->
 {#key $preferLastOpened}
-	<div class="overflow-x-auto w-full h-full max-h-full block">
+	<div class="overflow-y-auto overflow-x-hidden w-full h-full relative" bind:this={scrollElement}>
 		{#if $documentsShown.length > 0}
-			<SvelteTable />
+			<SvelteTable {scrollElement} />
 		{:else}
 			<div class="flex flex-col h-full px-4 py-2 mx-auto items-center justify-center max-h-[75vh]">
 				<img id="buzee-logo-img" class="w-25 my-2" src="/Buzee Logo.png" alt="No Results" />

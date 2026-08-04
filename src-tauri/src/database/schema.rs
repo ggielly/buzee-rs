@@ -89,7 +89,9 @@ table! {
     parse_pdfs -> Bool,
     manual_setup -> Bool,
     enable_logs -> Bool,
-    pdf_max_ocr_pages -> BigInt
+    pdf_max_ocr_pages -> BigInt,
+    ocr_threads -> BigInt,
+    ocr_sort_order -> Text
   }
 }
 

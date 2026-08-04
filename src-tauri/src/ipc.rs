@@ -3,7 +3,7 @@
 
 use crate::arc_read::get_arc_profiles;
 use crate::chrome_read::get_chrome_profiles;
-use crate::custom_types::{ContextMenuState, DBConnPoolState, DBStat, DateLimit, Error, IgnoreAllowCacheState, Payload, SyncRunningState, TantivyBookmarkSearchResult, TantivyDocumentSearchResult, TantivyReaderState, TantivyWriterState, UserPreferencesState, AppStatistics};
+use crate::custom_types::{ContextMenuState, DBConnPoolState, DBStat, DateLimit, Error, IgnoreAllowCacheState, OcrFailedFile, OcrRescanState, OcrSuccessFile, Payload, SyncRunningState, TantivyBookmarkSearchResult, TantivyDocumentSearchResult, TantivyReaderState, TantivyWriterState, UserPreferencesState, AppStatistics};
 use crate::database::{establish_connection, get_connection_pool};
 use crate::database::models::{DocumentSearchResult, IgnoreList};
 use crate::database::search::{
@@ -11,8 +11,8 @@ use crate::database::search::{
 };
 use crate::db_sync::{run_sync_operation, sync_status, add_specific_folders};
 use crate::housekeeping::get_app_directory;
-use crate::indexing::{add_path_to_ignore_list, all_allowed_filetypes, clear_last_parsed_dates_from_db, get_all_ignored_paths, remove_nonexistent_and_ignored_files, remove_paths_from_ignore_list};
-use crate::user_prefs::{fix_global_shortcut_string, get_global_shortcut, get_modifiers_and_code_from_global_shortcut, is_global_shortcut_enabled, return_user_prefs_state, set_automatic_background_sync_flag_in_db, set_default_user_prefs, set_detailed_scan_flag_in_db, set_global_shortcut_flag_in_db, set_launch_at_startup_flag_in_db, set_manual_setup_flag_in_db, set_new_global_shortcut_in_db, set_onboarding_done_flag_in_db, set_roadmap_survey_answered_flag_in_db, set_show_search_suggestions_flag_in_db, set_parse_pdfs_flag_in_db, set_enable_logs_flag_in_db, set_pdf_max_ocr_pages_in_db, set_user_preferences_state_from_db_value};
+use crate::indexing::{add_path_to_ignore_list, all_allowed_filetypes, clear_last_parsed_dates_from_db, get_all_ignored_paths, remove_nonexistent_and_ignored_files, remove_paths_from_ignore_list, rescan_ocr_documents, rescan_ocr_files as rescan_ocr_files_engine};
+use crate::user_prefs::{fix_global_shortcut_string, get_global_shortcut, get_modifiers_and_code_from_global_shortcut, is_global_shortcut_enabled, return_user_prefs_state, set_automatic_background_sync_flag_in_db, set_default_user_prefs, set_detailed_scan_flag_in_db, set_global_shortcut_flag_in_db, set_launch_at_startup_flag_in_db, set_manual_setup_flag_in_db, set_new_global_shortcut_in_db, set_onboarding_done_flag_in_db, set_roadmap_survey_answered_flag_in_db, set_show_search_suggestions_flag_in_db, set_parse_pdfs_flag_in_db, set_enable_logs_flag_in_db, set_pdf_max_ocr_pages_in_db, set_ocr_threads_in_db, set_ocr_sort_order_in_db, set_scan_running_status, set_user_preferences_state_from_db_value};
 use crate::utils::{extract_text_from_pdf, graceful_restart, read_image_to_base64, read_text_from_file, save_text_to_file};
 use crate::window::hide_or_show_window;
 use serde_json;
@@ -37,7 +37,11 @@ pub fn send_message_to_frontend(
     message: String,
     data: String,
 ) {
-  window.emit(&event, Payload { message, data }).unwrap();
+  // Emitting to the frontend is best-effort: the webview may be unmounted
+  // (e.g. during teardown), so a failed emit must not panic the app.
+  if let Err(err) = window.emit(&event, Payload { message, data }) {
+    log::warn!("Failed to emit '{}' to frontend: {}", event, err);
+  }
 }
 
 /// Refresh the cached allow/ignore lists from the database.
@@ -91,12 +95,15 @@ fn get_os() -> Result<String, Error> {
 
 // Get allowed filetypes
 #[tauri::command]
-fn get_allowed_filetypes(app: tauri::AppHandle) -> Result<String, Error> {
-  let mut connection = establish_connection(&app);
-  let allowed_filetypes = all_allowed_filetypes(&mut connection, true);
-  // Convert allowed_filetypes to JSON using serde_json
-  let json_response = serde_json::to_string(&allowed_filetypes).unwrap();
-  Ok(json_response)
+async fn get_allowed_filetypes(app: tauri::AppHandle) -> Result<String, Error> {
+  tokio::task::spawn_blocking(move || {
+    let mut connection = establish_connection(&app);
+    let allowed_filetypes = all_allowed_filetypes(&mut connection, true);
+    let json_response = serde_json::to_string(&allowed_filetypes).map_err(|e| Error::new(&e.to_string()))?;
+    Ok(json_response)
+  })
+  .await
+  .map_err(|e| Error::new(&e.to_string()))?
 }
 
 // Open a file (in default app) or a folder from the path
@@ -147,8 +154,11 @@ fn open_folder_containing_file(file_path: String) -> Result<String, Error> {
 
     if let Err(_err) = do_steps() {
         let path = std::path::PathBuf::from(file_path);
-        let dir = path.parent().unwrap();
-        let _ = open::that_detached(dir);
+        if let Some(dir) = path.parent() {
+            let _ = open::that_detached(dir);
+        } else {
+            log::warn!("Could not determine the parent folder for {}", path.display());
+        }
     }
     Ok("Opened the folder!".into())
 }
@@ -173,25 +183,38 @@ async fn run_file_sync(switch_off: bool, app: tauri::AppHandle, window: tauri::W
 // Ignore file or folder path
 #[tauri::command]
 async fn ignore_file_or_folder(app: tauri::AppHandle, path: String, is_directory: bool, should_ignore_indexing: bool) {
-  let mut conn = establish_connection(&app);
-  add_path_to_ignore_list(path, is_directory, should_ignore_indexing, &mut conn).unwrap();
-  refresh_ignore_allow_cache(&app);
-  remove_nonexistent_and_ignored_files(&mut conn, &app);
+  let app_clone = app.clone();
+  let _ = tokio::task::spawn_blocking(move || {
+    let mut conn = establish_connection(&app_clone);
+    if let Err(e) = add_path_to_ignore_list(path, is_directory, should_ignore_indexing, &mut conn) {
+      log::error!("Failed to add path to ignore list: {}", e);
+      return;
+    }
+    refresh_ignore_allow_cache(&app_clone);
+    remove_nonexistent_and_ignored_files(&mut conn, &app_clone);
+  }).await;
 }
 
 // Remove list of paths from Ignore List
 #[tauri::command]
 async fn remove_from_ignore_list(app: tauri::AppHandle, paths: Vec<String>) {
-  let mut conn = establish_connection(&app);
-  let _ = remove_paths_from_ignore_list(paths, &mut conn);
-  refresh_ignore_allow_cache(&app);
+  let app_clone = app.clone();
+  let _ = tokio::task::spawn_blocking(move || {
+    let mut conn = establish_connection(&app_clone);
+    let _ = remove_paths_from_ignore_list(paths, &mut conn);
+    refresh_ignore_allow_cache(&app_clone);
+  }).await;
 }
 
 // Ignore file or folder path
 #[tauri::command]
 async fn show_ignored_paths(app: tauri::AppHandle) -> Result<Vec<IgnoreList>, Error> {
-  let mut conn = establish_connection(&app);
-  Ok(get_all_ignored_paths(&mut conn))
+  tokio::task::spawn_blocking(move || {
+    let mut conn = establish_connection(&app);
+    Ok(get_all_ignored_paths(&mut conn))
+  })
+  .await
+  .map_err(|e| Error::new(&e.to_string()))?
 }
 
 // Get sync status
@@ -215,15 +238,20 @@ fn get_dashboard_stats(app: tauri::AppHandle) -> crate::custom_types::DashboardS
 
 // Get search suggestions
 #[tauri::command]
-fn get_search_suggestions(query: String, app: tauri::AppHandle) -> Result<Vec<String>, Error> {
-  let mut conn = establish_connection(&app);
-  let suggestions = get_metadata_title_matches(query, &mut conn).unwrap_or(vec![]);
-  Ok(suggestions)
+async fn get_search_suggestions(query: String, app: tauri::AppHandle) -> Result<Vec<String>, Error> {
+  tokio::task::spawn_blocking(move || {
+    let mut conn = establish_connection(&app);
+    let suggestions = get_metadata_title_matches(query, &mut conn).unwrap_or(vec![]);
+    Ok(suggestions)
+  })
+  .await
+  .map_err(|e| Error::new(&e.to_string()))?
 }
 
 // Run search
 #[tauri::command]
-fn run_search(query: String, page: i32, limit: i32, file_type: Option<String>, date_limit: Option<DateLimit>, app: tauri::AppHandle) -> Result<Vec<DocumentSearchResult>, Error> {
+async fn run_search(query: String, page: i32, limit: i32, file_type: Option<String>, date_limit: Option<DateLimit>, app: tauri::AppHandle) -> Result<Vec<DocumentSearchResult>, Error> {
+  tokio::task::spawn_blocking(move || {
     log::info!(
         "run_search: query: {}, page: {}, limit: {}, file_type: {:?}, date_limit: {:?}",
         query, page, limit, file_type, date_limit
@@ -231,51 +259,70 @@ fn run_search(query: String, page: i32, limit: i32, file_type: Option<String>, d
     let conn = establish_connection(&app);
     let search_results = search_fts_index(query, page, limit, file_type, date_limit, conn, &app).unwrap_or(vec![]);
     Ok(search_results)
+  })
+  .await
+  .map_err(|e| Error::new(&e.to_string()))?
 }
 
 // Get recently opened documents
 #[tauri::command]
-fn get_recent_docs(
+async fn get_recent_docs(
     page: i32,
     limit: i32,
     file_type: Option<String>,
     app: tauri::AppHandle
 ) -> Result<Vec<DocumentSearchResult>, Error> {
+  tokio::task::spawn_blocking(move || {
     let conn = establish_connection(&app);
-    let search_results = get_recently_opened_docs(page, limit, file_type, conn).unwrap();
+    let search_results = get_recently_opened_docs(page, limit, file_type, conn)?;
     Ok(search_results)
+  })
+  .await
+  .map_err(|e| Error::new(&e.to_string()))?
 }
 
 // Get DB Stats
 #[tauri::command]
-fn get_db_stats(app: tauri::AppHandle) -> Result<Vec<DBStat>, Error> {
-  let conn = establish_connection(&app);
-  let db_stats = get_counts_for_all_filetypes(conn).unwrap();
-  Ok(db_stats)
+async fn get_db_stats(app: tauri::AppHandle) -> Result<Vec<DBStat>, Error> {
+  tokio::task::spawn_blocking(move || {
+    let conn = establish_connection(&app);
+    let db_stats = get_counts_for_all_filetypes(conn)?;
+    Ok(db_stats)
+  })
+  .await
+  .map_err(|e| Error::new(&e.to_string()))?
 }
 
 // Get Total Files and Files Parsed
 #[tauri::command]
-fn get_count_of_files_parsed(app: tauri::AppHandle) -> Result<i64, Error> {
-  let conn = establish_connection(&app);
-  let result = get_file_parsed_count(conn).unwrap();
-  Ok(result)
+async fn get_count_of_files_parsed(app: tauri::AppHandle) -> Result<i64, Error> {
+  tokio::task::spawn_blocking(move || {
+    let conn = establish_connection(&app);
+    let result = get_file_parsed_count(conn)?;
+    Ok(result)
+  })
+  .await
+  .map_err(|e| Error::new(&e.to_string()))?
 }
 
 // Get parsed text for file
 #[tauri::command]
 async fn get_text_for_file(document_id: i32, app: tauri::AppHandle) -> Result<Vec<String>, Error> {
+  tokio::task::spawn_blocking(move || {
     log::info!("Getting text for file ID: {}", document_id);
     let mut conn = establish_connection(&app);
-    let text = get_parsed_text_for_file(document_id, &mut conn).unwrap();
+    let text = get_parsed_text_for_file(document_id, &mut conn)?;
     Ok(text)
+  })
+  .await
+  .map_err(|e| Error::new(&e.to_string()))?
 }
 
 // Extract text for PDF
 #[tauri::command]
 async fn extract_text_from_pdf_file(file_path: String, app: tauri::AppHandle) -> Result<Vec<String>, Error> {
   let mut conn = establish_connection(&app);
-  let text = extract_text_from_pdf(file_path, &mut conn, &app).await.unwrap();
+  let text = extract_text_from_pdf(file_path, &mut conn, &app).await?;
   Ok(text)
 }
 
@@ -306,7 +353,11 @@ fn open_quicklook(file_path: String) -> Result<String, Error> {
 
     #[cfg(target_os = "windows")]
     std::thread::spawn(move || {
-      let home_directory = home_dir().unwrap().to_string_lossy().to_string();
+      let Some(home_directory) = home_dir() else {
+        log::warn!("Could not resolve home directory for QuickLook peek");
+        return;
+      };
+      let home_directory = home_directory.to_string_lossy().to_string();
       let quicklook_path = format!("{}\\AppData\\Local\\Programs\\QuickLook\\QuickLook.exe", &home_directory);
       let _ = std::process::Command::new(quicklook_path)
         .arg(file_path)
@@ -430,6 +481,180 @@ fn set_pdf_max_ocr_pages(app_handle: tauri::AppHandle, pages: i64) {
   set_user_preferences_state_from_db_value(&app_handle);
 }
 
+#[tauri::command]
+fn set_ocr_threads(app_handle: tauri::AppHandle, threads: i64) {
+  log::info!("Setting OCR threads to {}", threads);
+  let threads = threads.clamp(1, 4);
+  set_ocr_threads_in_db(threads, &app_handle);
+  set_user_preferences_state_from_db_value(&app_handle);
+}
+
+#[tauri::command]
+fn set_ocr_sort_order(app_handle: tauri::AppHandle, sort_order: String) {
+  log::info!("Setting OCR sort order to {}", sort_order);
+  set_ocr_sort_order_in_db(sort_order, &app_handle);
+  set_user_preferences_state_from_db_value(&app_handle);
+}
+
+#[tauri::command]
+async fn start_ocr_rescan(
+  app_handle: tauri::AppHandle,
+  window: tauri::WebviewWindow,
+) -> Result<(), Error> {
+  // Guard against a rescan already being in flight.
+  let running = {
+    let state = app_handle.state::<Mutex<OcrRescanState>>();
+    let running = state
+      .lock()
+      .unwrap()
+      .running
+      .load(std::sync::atomic::Ordering::SeqCst);
+    running
+  };
+  if running {
+    return Err(Error::new("An OCR rescan is already running"));
+  }
+
+  let threads = crate::user_prefs::get_ocr_threads(&app_handle);
+  let sort_order = crate::user_prefs::get_ocr_sort_order(&app_handle);
+
+  // Reset the cancellation flag, clear the previous failure list and mark the
+  // rescan as running.
+  {
+    let state = app_handle.state::<Mutex<OcrRescanState>>();
+    let mut state = state.lock().unwrap();
+    state.cancelled.store(false, std::sync::atomic::Ordering::SeqCst);
+    state.running.store(true, std::sync::atomic::Ordering::SeqCst);
+    state.failed_files.lock().unwrap().clear();
+    state.success_files.lock().unwrap().clear();
+  }
+
+  // Mark the DB scan as running so the status bar reflects it.
+  {
+    let mut conn = establish_connection(&app_handle);
+    set_scan_running_status(&mut conn, true, false, &app_handle);
+  }
+
+  let app_clone = app_handle.clone();
+  let window_clone = window.clone();
+  tauri::async_runtime::spawn(async move {
+    let completed = rescan_ocr_documents(&app_clone, window_clone, sort_order, threads).await;
+    {
+      let state = app_clone.state::<Mutex<OcrRescanState>>();
+      let mut state = state.lock().unwrap();
+      state.running.store(false, std::sync::atomic::Ordering::SeqCst);
+      state.cancelled.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+    log::info!(
+      "OCR rescan finished, completed: {}",
+      completed
+    );
+  });
+
+  Ok(())
+}
+
+#[tauri::command]
+async fn rescan_ocr_files(
+  app_handle: tauri::AppHandle,
+  window: tauri::WebviewWindow,
+  paths: Vec<String>,
+) -> Result<(), Error> {
+  // Guard against a rescan already being in flight.
+  let running = {
+    let state = app_handle.state::<Mutex<OcrRescanState>>();
+    let running = state
+      .lock()
+      .unwrap()
+      .running
+      .load(std::sync::atomic::Ordering::SeqCst);
+    running
+  };
+  if running {
+    return Err(Error::new("An OCR rescan is already running"));
+  }
+  if paths.is_empty() {
+    return Ok(());
+  }
+
+  let threads = crate::user_prefs::get_ocr_threads(&app_handle);
+
+  // Reset the cancellation flag, clear the previous failure list and mark the
+  // rescan as running.
+  {
+    let state = app_handle.state::<Mutex<OcrRescanState>>();
+    let mut state = state.lock().unwrap();
+    state.cancelled.store(false, std::sync::atomic::Ordering::SeqCst);
+    state.running.store(true, std::sync::atomic::Ordering::SeqCst);
+    state.failed_files.lock().unwrap().clear();
+    state.success_files.lock().unwrap().clear();
+  }
+
+  // Mark the DB scan as running so the status bar reflects it.
+  {
+    let mut conn = establish_connection(&app_handle);
+    set_scan_running_status(&mut conn, true, false, &app_handle);
+  }
+
+  let app_clone = app_handle.clone();
+  let window_clone = window.clone();
+  let num_paths = paths.len();
+  tauri::async_runtime::spawn(async move {
+    let completed = rescan_ocr_files_engine(&app_clone, window_clone, paths, threads).await;
+    {
+      let state = app_clone.state::<Mutex<OcrRescanState>>();
+      let mut state = state.lock().unwrap();
+      state.running.store(false, std::sync::atomic::Ordering::SeqCst);
+      state.cancelled.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+    log::info!(
+      "OCR rescan of {} files finished, completed: {}",
+      num_paths,
+      completed
+    );
+  });
+
+  Ok(())
+}
+
+#[tauri::command]
+fn get_ocr_rescan_failed_files(app_handle: tauri::AppHandle) -> Vec<OcrFailedFile> {
+  let state = app_handle.state::<Mutex<OcrRescanState>>();
+  let state = state.lock().unwrap();
+  let files = state.failed_files.lock().unwrap().clone();
+  files
+}
+
+#[tauri::command]
+fn get_ocr_rescan_success_files(app_handle: tauri::AppHandle) -> Vec<OcrSuccessFile> {
+  let state = app_handle.state::<Mutex<OcrRescanState>>();
+  let state = state.lock().unwrap();
+  let files = state.success_files.lock().unwrap().clone();
+  files
+}
+
+#[tauri::command]
+fn stop_ocr_rescan(app_handle: tauri::AppHandle) {
+  let state = app_handle.state::<Mutex<OcrRescanState>>();
+  let state = state.lock().unwrap();
+  if !state.running.load(std::sync::atomic::Ordering::SeqCst) {
+    return;
+  }
+  log::info!("Stopping OCR rescan");
+  state.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[tauri::command]
+fn get_ocr_rescan_status(app_handle: tauri::AppHandle) -> bool {
+  let state = app_handle.state::<Mutex<OcrRescanState>>();
+  let status = state
+    .lock()
+    .unwrap()
+    .running
+    .load(std::sync::atomic::Ordering::SeqCst);
+  status
+}
+
 // Set new global shortcut in DB and update the global shortcut
 #[tauri::command]
 async fn set_new_global_shortcut(app_handle: tauri::AppHandle, new_shortcut_string: String) {
@@ -445,26 +670,34 @@ async fn set_new_global_shortcut(app_handle: tauri::AppHandle, new_shortcut_stri
 }
 
 #[tauri::command]
-fn search_tantivy_files_index(app_handle: tauri::AppHandle, user_query: String, limit: i32, page: i32) -> Result<Vec<TantivyDocumentSearchResult>, Error> {
-  log::info!("Searching Tantivy index...");
-  let tantivy_index = get_tantivy_index_cached().unwrap();
-  let searcher = acquire_searcher_from_reader(&app_handle).unwrap();
+async fn search_tantivy_files_index(app_handle: tauri::AppHandle, user_query: String, limit: i32, page: i32) -> Result<Vec<TantivyDocumentSearchResult>, Error> {
+  tokio::task::spawn_blocking(move || {
+    log::info!("Searching Tantivy index...");
+    let tantivy_index = get_tantivy_index_cached().map_err(|e| Error::new(&e.to_string()))?;
+    let searcher = acquire_searcher_from_reader(&app_handle)?;
 
-  let top_docs = parse_query_and_get_top_docs(&tantivy_index, &searcher, user_query, limit, page*limit).unwrap();
-  let search_results = return_document_search_results(&tantivy_index, &searcher, top_docs).unwrap_or(vec![]);
+    let top_docs = parse_query_and_get_top_docs(&tantivy_index, &searcher, user_query, limit, page*limit).map_err(|e| Error::new(&e.to_string()))?;
+    let search_results = return_document_search_results(&tantivy_index, &searcher, top_docs).unwrap_or(vec![]);
 
-  Ok(search_results)
+    Ok(search_results)
+  })
+  .await
+  .map_err(|e| Error::new(&e.to_string()))?
 }
 
 #[tauri::command]
-fn search_tantivy_bookmarks_index(app_handle: tauri::AppHandle, user_query: String, limit: i32, page: i32) -> Result<Vec<TantivyBookmarkSearchResult>, Error> {
-  log::info!("Searching Tantivy index...");
-  let tantivy_index = get_tantivy_index_cached().unwrap();
-  let searcher = acquire_searcher_from_reader(&app_handle).unwrap();
+async fn search_tantivy_bookmarks_index(app_handle: tauri::AppHandle, user_query: String, limit: i32, page: i32) -> Result<Vec<TantivyBookmarkSearchResult>, Error> {
+  tokio::task::spawn_blocking(move || {
+    log::info!("Searching Tantivy index...");
+    let tantivy_index = get_tantivy_index_cached().map_err(|e| Error::new(&e.to_string()))?;
+    let searcher = acquire_searcher_from_reader(&app_handle)?;
 
-  let top_docs = parse_query_and_get_top_docs(&tantivy_index, &searcher, user_query, limit, page*limit).unwrap();
-  let search_results = return_bookmark_search_results(&tantivy_index, &searcher, top_docs).unwrap_or(vec![]);
-  Ok(search_results)
+    let top_docs = parse_query_and_get_top_docs(&tantivy_index, &searcher, user_query, limit, page*limit).map_err(|e| Error::new(&e.to_string()))?;
+    let search_results = return_bookmark_search_results(&tantivy_index, &searcher, top_docs).unwrap_or(vec![]);
+    Ok(search_results)
+  })
+  .await
+  .map_err(|e| Error::new(&e.to_string()))?
 }
 
 #[tauri::command]
@@ -495,21 +728,33 @@ async fn rescan_documents(rescan_all: bool, window: tauri::WebviewWindow, app: t
 }
 
 #[tauri::command]
-fn get_chrome_user_profiles() -> Result<Vec<String>, Error> {
-  let user_profiles = get_chrome_profiles();
-  Ok(user_profiles)
+async fn get_chrome_user_profiles() -> Result<Vec<String>, Error> {
+  tokio::task::spawn_blocking(move || {
+    let user_profiles = get_chrome_profiles();
+    Ok(user_profiles)
+  })
+  .await
+  .map_err(|e| Error::new(&e.to_string()))?
 }
 
 #[tauri::command]
-fn get_arc_user_profiles() -> Result<Vec<String>, Error> {
-  let user_profiles = get_arc_profiles();
-  Ok(user_profiles)
+async fn get_arc_user_profiles() -> Result<Vec<String>, Error> {
+  tokio::task::spawn_blocking(move || {
+    let user_profiles = get_arc_profiles();
+    Ok(user_profiles)
+  })
+  .await
+  .map_err(|e| Error::new(&e.to_string()))?
 }
 
 #[tauri::command]
-fn run_browser_history_search(user_profile: String, user_query: String, limit: i32, page: i32) -> Result<Vec<DocumentSearchResult>, Error> {
-  let search_results = search_browser_history(user_profile, user_query, limit, page).unwrap_or(vec![]);
-  Ok(search_results)
+async fn run_browser_history_search(user_profile: String, user_query: String, limit: i32, page: i32) -> Result<Vec<DocumentSearchResult>, Error> {
+  tokio::task::spawn_blocking(move || {
+    let search_results = search_browser_history(user_profile, user_query, limit, page).unwrap_or(vec![]);
+    Ok(search_results)
+  })
+  .await
+  .map_err(|e| Error::new(&e.to_string()))?
 }
 
 pub fn initialize() {
@@ -539,6 +784,14 @@ pub fn initialize() {
       open_context_menu,
       set_user_preference,
       set_pdf_max_ocr_pages,
+      set_ocr_threads,
+      set_ocr_sort_order,
+      start_ocr_rescan,
+      rescan_ocr_files,
+      stop_ocr_rescan,
+      get_ocr_rescan_status,
+      get_ocr_rescan_failed_files,
+      get_ocr_rescan_success_files,
       set_new_global_shortcut,
       crate::drag::start_drag,
       get_user_preferences_state,
@@ -564,7 +817,7 @@ pub fn initialize() {
           // manage state(s)
           let handle = app.handle();
           // db connection pool
-          let pool = get_connection_pool();
+          let pool = get_connection_pool()?;
           handle.manage(Mutex::new(DBConnPoolState::new(pool)));
           // tantivy reader state
           let tantivy_index = get_tantivy_index_cached().unwrap();
@@ -578,9 +831,12 @@ pub fn initialize() {
           set_user_preferences_state_from_db_value(app.handle());
           // sync running state
           handle.manage(Mutex::new(SyncRunningState::default()));
+          // ocr rescan state — tracks whether an OCR rescan is running and whether
+          // it should be cancelled. Reset on startup to a clean, non-running state.
+          handle.manage(Mutex::new(OcrRescanState::new()));
           // ignore/allow list cache — loaded once at startup, refreshed after list changes
           {
-            let mut direct_conn = crate::database::establish_direct_connection_to_db();
+            let mut direct_conn = crate::database::establish_direct_connection_to_db()?;
             let ignore_allow_cache = IgnoreAllowCacheState::from_db(&mut direct_conn);
             handle.manage(Mutex::new(ignore_allow_cache));
           }

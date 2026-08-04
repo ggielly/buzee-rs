@@ -1,9 +1,9 @@
 use std::sync::Mutex;
 use tauri::Manager;
 use crate::custom_types::DBConnPoolState;
-// use crate::custom_types::Error;
+use crate::custom_types::Error;
 use diesel::prelude::*;
-use diesel::r2d2::{Pool, PooledConnection, ConnectionManager};
+use diesel::r2d2::{CustomizeConnection, Pool, PooledConnection, ConnectionManager};
 use diesel::SqliteConnection;
 use crate::housekeeping::{get_documents_directory, APP_DIRECTORY};
 use crate::utils::norm;
@@ -17,6 +17,8 @@ use queries::{
   USER_PREFS_TABLE_CREATE_STATEMENT,
   USER_PREFS_TABLE_ALTER_ADD_ENABLE_LOGS,
   USER_PREFS_TABLE_ALTER_ADD_MAX_OCR_PAGES,
+  USER_PREFS_TABLE_ALTER_ADD_OCR_THREADS,
+  USER_PREFS_TABLE_ALTER_ADD_OCR_SORT_ORDER,
   APP_DATA_TABLE_CREATE_STATEMENT,
   IGNORE_LIST_TABLE_CREATE_STATEMENT,
   ALLOW_LIST_TABLE_CREATE_STATEMENT,
@@ -34,8 +36,9 @@ pub mod search;
 mod queries;
 // mod response_models;
 
-fn get_db_url() -> String {
-  let app_dir = get_documents_directory().unwrap();
+fn get_db_url() -> Result<String, Error> {
+  let app_dir = get_documents_directory()
+    .ok_or_else(|| Error::new("Could not resolve the documents directory"))?;
   log::info!("app_dir: {}", app_dir);
   let database_path = format!("{}/{}/{}", app_dir, APP_DIRECTORY, DB_NAME);
   let database_path = norm(&database_path);
@@ -48,50 +51,87 @@ fn get_db_url() -> String {
   {
     database_url = format!("sqlite://{}", database_path);
   }
-  database_url
+  Ok(database_url)
 }
 
-pub fn get_connection_pool() -> Pool<ConnectionManager<SqliteConnection>> {
-  let database_url = get_db_url();
+// Per-connection SQLite settings. `journal_mode=WAL` is intentionally excluded:
+// it is set once at startup in housekeeping::initialize() and persists at the
+// database level (and it cannot be changed once a connection has entered a
+// transaction).
+const CONNECTION_PRAGMAS: [&str; 5] = [
+  "PRAGMA foreign_keys = ON;",
+  "PRAGMA busy_timeout = 5000;",
+  "PRAGMA synchronous = NORMAL;",
+  "PRAGMA cache_size = -64000;",
+  "PRAGMA auto_vacuum = FULL;",
+];
+
+fn apply_connection_pragmas(conn: &mut SqliteConnection) -> Result<(), diesel::r2d2::Error> {
+  for pragma in CONNECTION_PRAGMAS {
+    diesel::sql_query(pragma).execute(conn)?;
+  }
+  Ok(())
+}
+
+/// Applies the per-connection PRAGMAs once, when a new connection is created
+/// by the pool — not on every checkout from the pool.
+#[derive(Debug)]
+struct SqlitePragmaCustomizer;
+
+impl CustomizeConnection<SqliteConnection, diesel::r2d2::Error> for SqlitePragmaCustomizer {
+  fn on_acquire(&self, conn: &mut SqliteConnection) -> Result<(), diesel::r2d2::Error> {
+    apply_connection_pragmas(conn)
+  }
+}
+
+pub fn get_connection_pool() -> Result<Pool<ConnectionManager<SqliteConnection>>, Error> {
+  let database_url = get_db_url()?;
   log::info!("Creating connection pool for db at: {}", &database_url);
   let manager = ConnectionManager::<SqliteConnection>::new(database_url);
   Pool::builder()
       .test_on_check_out(true)
       .max_size(10)
+      .connection_customizer(Box::new(SqlitePragmaCustomizer))
       .build(manager)
-      .expect("Could not build connection pool")
+      .map_err(|e| Error::new(&e.to_string()))
 }
+
+// How many times to retry a pooled connection checkout before giving up. Pool
+// outages (e.g. a momentarily locked SQLite database) are transient, so a
+// single failure must not panic the app.
+const MAX_CONNECTION_ATTEMPTS: u32 = 5;
 
 pub fn establish_connection(app: &tauri::AppHandle) -> PooledConnection<ConnectionManager<SqliteConnection>> {
   let state_mutex = app.state::<Mutex<DBConnPoolState>>();
   let state = state_mutex.lock().unwrap();
   let pool = &state.conn_pool;
 
-  let mut connection = pool.get().unwrap();
-
-  // Per-connection PRAGMAs. journal_mode=WAL is set once at startup in
-  // housekeeping::initialize() and persists at the database level.
-  diesel::sql_query("PRAGMA foreign_keys = ON;").execute(&mut connection).unwrap();
-  diesel::sql_query("PRAGMA busy_timeout = 5000;").execute(&mut connection).unwrap();
-  diesel::sql_query("PRAGMA synchronous = NORMAL;").execute(&mut connection).unwrap();
-  diesel::sql_query("PRAGMA cache_size = -64000;").execute(&mut connection).unwrap();
-  diesel::sql_query("PRAGMA auto_vacuum = FULL;").execute(&mut connection).unwrap();
-
-  connection
+  let mut attempt = 0;
+  loop {
+    attempt += 1;
+    match pool.get() {
+      Ok(connection) => return connection,
+      Err(e) => {
+        log::error!("Could not get DB connection from pool (attempt {} of {}): {}", attempt, MAX_CONNECTION_ATTEMPTS, e);
+        if attempt >= MAX_CONNECTION_ATTEMPTS {
+          panic!("Could not get a DB connection from the pool after {} attempts: {}", attempt, e);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100 * attempt as u64));
+      }
+    }
+  }
 }
 
-pub fn establish_direct_connection_to_db() -> SqliteConnection {
-  let database_url = get_db_url();
+pub fn establish_direct_connection_to_db() -> Result<SqliteConnection, Error> {
+  let database_url = get_db_url()?;
   log::info!("Creating direct connection to db at: {}", &database_url);
-  let mut connection = SqliteConnection::establish(&database_url).unwrap();
+  let mut connection = SqliteConnection::establish(&database_url)
+    .map_err(|e| Error::new(&e.to_string()))?;
 
-  diesel::sql_query("PRAGMA foreign_keys = ON;").execute(&mut connection).unwrap();
-  diesel::sql_query("PRAGMA busy_timeout = 5000;").execute(&mut connection).unwrap();
-  diesel::sql_query("PRAGMA synchronous = NORMAL;").execute(&mut connection).unwrap();
-  diesel::sql_query("PRAGMA cache_size = -64000;").execute(&mut connection).unwrap();
-  diesel::sql_query("PRAGMA auto_vacuum = FULL;").execute(&mut connection).unwrap();
+  apply_connection_pragmas(&mut connection)
+    .map_err(|e| Error::new(&e.to_string()))?;
 
-  connection
+  Ok(connection)
 }
 
 // Create all tables and triggers in the db if they don't exist
@@ -101,6 +141,8 @@ pub fn create_tables_if_not_exists(conn: &mut SqliteConnection) -> Result<usize,
   // Best-effort migrations for pre-existing databases (no-op if the columns already exist)
   let _ = diesel::sql_query(USER_PREFS_TABLE_ALTER_ADD_ENABLE_LOGS.to_string()).execute(conn);
   let _ = diesel::sql_query(USER_PREFS_TABLE_ALTER_ADD_MAX_OCR_PAGES.to_string()).execute(conn);
+  let _ = diesel::sql_query(USER_PREFS_TABLE_ALTER_ADD_OCR_THREADS.to_string()).execute(conn);
+  let _ = diesel::sql_query(USER_PREFS_TABLE_ALTER_ADD_OCR_SORT_ORDER.to_string()).execute(conn);
   diesel::sql_query(APP_DATA_TABLE_CREATE_STATEMENT.to_string()).execute(conn)?;
   diesel::sql_query(IGNORE_LIST_TABLE_CREATE_STATEMENT.to_string()).execute(conn)?;
   diesel::sql_query(ALLOW_LIST_TABLE_CREATE_STATEMENT.to_string()).execute(conn)?;

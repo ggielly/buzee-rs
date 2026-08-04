@@ -1,4 +1,5 @@
 import { writable } from 'svelte/store'
+import type { SvelteVirtualizer } from '@tanstack/svelte-virtual'
 
 // 1. Get the value out of storage on load.
 // let storedSearchQuery = localStorage.searchQuery;
@@ -77,6 +78,8 @@ export const userPreferences = writable({
   "manual_setup": false,
   "enable_logs": false,
   "pdf_max_ocr_pages": 150,
+  "ocr_threads": 1,
+  "ocr_sort_order": "size_asc",
 })
 export const pagePath = writable("")
 export const isMac = writable(false)
@@ -109,6 +112,31 @@ export const base64SearchInProgress = writable(false);
 export const dbCreationInProgress = writable(false);
 export const windowBlurred = writable(false);
 export const base64Images = writable(storedBase64Images || [])
+
+// Maximum number of base64 thumbnails to keep in memory. Beyond this, the
+// least-recently-added entry is evicted to avoid unbounded memory growth
+// during long search sessions.
+export const MAX_CACHED_THUMBNAILS = 80;
+
+// Add or refresh a thumbnail in LRU order: an existing entry is moved to the
+// newest slot (unique per path) and the oldest entry is evicted once the cache
+// exceeds its cap. Ordering by most-recently-added mirrors the on-screen
+// scroll window, so the scrolled-away rows are the first to be dropped.
+export function upsertBase64Image(image: Base64ImageObject) {
+  base64Images.update((images) => {
+    const next = images.filter((i) => i.path !== image.path);
+    next.push(image);
+    if (next.length > MAX_CACHED_THUMBNAILS) {
+      next.splice(0, next.length - MAX_CACHED_THUMBNAILS);
+    }
+    return next;
+  });
+}
+
+// Clear the whole thumbnail cache (used when starting a fresh search).
+export function clearBase64Images() {
+  base64Images.set([]);
+}
 export const preferLastOpened = writable(false);
 export const showResultTextPreview = writable(false);
 export const noMoreResults = writable(false);
@@ -140,19 +168,23 @@ if (typeof window !== "undefined") {
   darkMode.subscribe((value) => { localStorage.darkMode = value; });
 }
 
-// 3. Anytime the store changes, update the local storage value.
+// Row virtualizer instance set by svelteTable.svelte; read by the keyboard
+// listeners to scroll a result index into view after arrow-key navigation.
+export const tableVirtualizer = writable<SvelteVirtualizer<HTMLElement, HTMLElement> | null>(null);
+
+// 3. Anytime a display preference changes, update the local storage value.
+// Only lightweight UI preferences are persisted — never the result sets or the
+// search query, which would bloat the 5MB WebView quota and leak searched text.
 if(typeof window !== "undefined") {
   pinMode.subscribe(value => { localStorage.pinMode = value })
-  searchQuery.subscribe(value => { localStorage.searchQuery = value })
-  documentsShown.subscribe(value => { localStorage.documentsShown = value })
   filetypeShown.subscribe(value => { localStorage.filetypeShown = value })
-  resultsPageShown.subscribe(value => { localStorage.resultsPageShown = value })
   resultsPerPage.subscribe(value => { localStorage.resultsPerPage = value })
-  statusMessage.subscribe(value => { localStorage.statusMessage = value })
   compactViewMode.subscribe(value => { localStorage.compactViewMode = value })
   // searchTrigger.subscribe(value => { localStorage.searchTrigger = value })
   // searchResults.subscribe(value => { localStorage.searchResults = value })
   // searchHistory.subscribe(value => { localStorage.searchHistory = value })
+  // searchQuery.subscribe(value => { localStorage.searchQuery = value })
+  // documentsShown.subscribe(value => { localStorage.documentsShown = value })
   // timeTaken.subscribe(value => { localStorage.timeTaken = value })
   // numResultsReceived.subscribe(value => { localStorage.numResultsReceived = value })
   // dbStats.subscribe(value => { localStorage.dbStats = value })

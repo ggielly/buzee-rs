@@ -220,7 +220,9 @@ pub const USER_PREFS_TABLE_CREATE_STATEMENT : &str = r#"
     parse_pdfs BOOLEAN NOT NULL DEFAULT 1,
     manual_setup BOOLEAN NOT NULL DEFAULT 0,
     enable_logs BOOLEAN NOT NULL DEFAULT 0,
-    pdf_max_ocr_pages BIGINT NOT NULL DEFAULT 150
+    pdf_max_ocr_pages BIGINT NOT NULL DEFAULT 150,
+    ocr_threads BIGINT NOT NULL DEFAULT 1,
+    ocr_sort_order TEXT NOT NULL DEFAULT "size_asc"
   );
 "#;
 
@@ -237,6 +239,16 @@ pub const USER_PREFS_TABLE_ALTER_ADD_ENABLE_LOGS : &str = r#"
 pub const USER_PREFS_TABLE_ALTER_ADD_MAX_OCR_PAGES : &str = r#"
   ALTER TABLE user_preferences
   ADD COLUMN pdf_max_ocr_pages BIGINT NOT NULL DEFAULT 150;
+"#;
+
+pub const USER_PREFS_TABLE_ALTER_ADD_OCR_THREADS : &str = r#"
+  ALTER TABLE user_preferences
+  ADD COLUMN ocr_threads BIGINT NOT NULL DEFAULT 1;
+"#;
+
+pub const USER_PREFS_TABLE_ALTER_ADD_OCR_SORT_ORDER : &str = r#"
+  ALTER TABLE user_preferences
+  ADD COLUMN ocr_sort_order TEXT NOT NULL DEFAULT "size_asc";
 "#;
 
 // APP_DATA stores basic app data and file type data

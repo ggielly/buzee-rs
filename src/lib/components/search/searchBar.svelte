@@ -26,12 +26,24 @@
 	let getSuggestions = true;
 	let search = '';
 
+	// Debounce suggestions: only hit the `get_search_suggestions` IPC once the
+	// user pauses typing (~250ms) so rapid keystrokes don't flood the backend.
+	let suggestionsDebounce: ReturnType<typeof setTimeout> | undefined;
+
 	$: search = $searchQuery;
 
 	$: if ($searchQuery.length >= 3 && getSuggestions && $userPreferences.show_search_suggestions) {
-		getSearchSuggestions();
+		scheduleSuggestions();
 	} else if ($searchQuery.length < 3) {
+		clearTimeout(suggestionsDebounce);
 		$searchSuggestions = [];
+	}
+
+	function scheduleSuggestions() {
+		clearTimeout(suggestionsDebounce);
+		suggestionsDebounce = setTimeout(() => {
+			void getSearchSuggestions();
+		}, 250);
 	}
 
 	async function getSearchSuggestions() {
@@ -149,6 +161,7 @@
 	});
 
 	onDestroy(() => {
+		clearTimeout(suggestionsDebounce);
 		document.removeEventListener('keydown', handleKeydown);
 	});
 </script>
