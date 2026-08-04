@@ -1,14 +1,19 @@
 // Defines the DocumentItem type
 // DocumentSearchResult type is derived from DocumentItem
 
+use super::schema::{
+    allow_list, app_data, body, document, file_types, ignore_list, metadata, metadata_fts,
+    user_preferences,
+};
 use diesel::prelude::*;
 use diesel::Insertable;
-use super::schema::{document, metadata, metadata_fts, body, user_preferences, app_data, ignore_list, allow_list, file_types};
 use serde::Deserialize;
 use serde::Serialize;
 
 // This struct is for CRUD on the user_prefs table
-#[derive(Serialize, Deserialize, Insertable, Queryable, QueryableByName, PartialEq, Debug, Clone)]
+#[derive(
+    Serialize, Deserialize, Insertable, Queryable, QueryableByName, PartialEq, Debug, Clone,
+)]
 #[diesel(table_name = user_preferences)]
 pub struct UserPrefs {
     pub first_launch_done: bool,
@@ -30,7 +35,9 @@ pub struct UserPrefs {
 }
 
 // This struct is for CRUD on the app_data table
-#[derive(Serialize, Deserialize, Insertable, Queryable, QueryableByName, PartialEq, Debug, Clone)]
+#[derive(
+    Serialize, Deserialize, Insertable, Queryable, QueryableByName, PartialEq, Debug, Clone,
+)]
 #[diesel(table_name = app_data)]
 pub struct AppData {
     pub app_name: String,
@@ -39,11 +46,13 @@ pub struct AppData {
     pub app_theme: String,
     pub app_language: String,
     pub last_scan_time: i64,
-    pub scan_running: bool
+    pub scan_running: bool,
 }
 
 // This struct is for CRUD on the ignore_list table
-#[derive(Serialize, Deserialize, Insertable, Queryable, QueryableByName, PartialEq, Debug, Clone)]
+#[derive(
+    Serialize, Deserialize, Insertable, Queryable, QueryableByName, PartialEq, Debug, Clone,
+)]
 #[diesel(table_name = ignore_list)]
 pub struct IgnoreList {
     pub path: String,
@@ -52,7 +61,9 @@ pub struct IgnoreList {
 }
 
 // This struct is for CRUD on the allow_list table
-#[derive(Serialize, Deserialize, Insertable, Queryable, QueryableByName, PartialEq, Debug, Clone)]
+#[derive(
+    Serialize, Deserialize, Insertable, Queryable, QueryableByName, PartialEq, Debug, Clone,
+)]
 #[diesel(table_name = allow_list)]
 pub struct AllowList {
     pub path: String,
@@ -60,7 +71,9 @@ pub struct AllowList {
 }
 
 // This struct is for CRUD on the file_types table
-#[derive(Serialize, Deserialize, Insertable, Queryable, QueryableByName, PartialEq, Debug, Clone)]
+#[derive(
+    Serialize, Deserialize, Insertable, Queryable, QueryableByName, PartialEq, Debug, Clone,
+)]
 #[diesel(table_name = file_types)]
 pub struct FileTypes {
     pub file_type: String,
@@ -70,7 +83,9 @@ pub struct FileTypes {
 }
 
 // This struct is for INSERTING into the document table
-#[derive(Serialize, Deserialize, Insertable, Queryable, QueryableByName, PartialEq, Debug, Clone)]
+#[derive(
+    Serialize, Deserialize, Insertable, Queryable, QueryableByName, PartialEq, Debug, Clone,
+)]
 #[diesel(table_name = document)]
 pub struct DocumentItem {
     pub source_domain: String,
@@ -91,7 +106,9 @@ pub struct DocumentItem {
 
 // This struct is for INSERTING into the metadata table which is something you should NEVER DO
 // because metadata table is maintained using triggers in SQLite
-#[derive(Serialize, Deserialize, Insertable, Queryable, QueryableByName, PartialEq, Debug, Clone)]
+#[derive(
+    Serialize, Deserialize, Insertable, Queryable, QueryableByName, PartialEq, Debug, Clone,
+)]
 #[diesel(table_name = metadata)]
 pub struct MetadataItem {
     pub source_table: String,
@@ -108,7 +125,9 @@ pub struct MetadataItem {
 }
 
 // This struct is for INSERTING into the body table
-#[derive(Serialize, Deserialize, Insertable, Queryable, QueryableByName, PartialEq, Debug, Clone)]
+#[derive(
+    Serialize, Deserialize, Insertable, Queryable, QueryableByName, PartialEq, Debug, Clone,
+)]
 #[diesel(table_name = body)]
 pub struct BodyItem {
     pub metadata_id: i32,
@@ -119,6 +138,7 @@ pub struct BodyItem {
 
 // This struct is for SELECTING from the metadata table without any JOINs
 #[derive(Serialize, Deserialize, Queryable, QueryableByName, PartialEq, Debug, Clone)]
+#[allow(dead_code)]
 #[diesel(table_name = metadata)]
 pub struct MetadataSearchResult {
     pub id: i32,
@@ -164,6 +184,7 @@ pub struct DocumentSearchResult {
 
 // This struct is for SELECTING from the document table via the metadata table when searching the body_fts table
 #[derive(Serialize, Queryable, Debug)]
+#[allow(dead_code)]
 pub struct DocumentResponseModel {
     pub metadata_id: i32,
     pub source_table: String,
@@ -181,6 +202,7 @@ pub struct DocumentResponseModel {
 
 // This struct is for SELECTING titles from the metadata_fts table
 #[derive(Serialize, Queryable, Debug)]
+#[allow(dead_code)]
 pub struct SearchSuggestionsModel {
-    pub title: String
+    pub title: String,
 }

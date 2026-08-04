@@ -1,6 +1,6 @@
 // Extract text from a .txt or .md file
 use std::error::Error;
-use std::fs::{File, read_to_string, metadata};
+use std::fs::{metadata, read_to_string, File};
 use std::io::{prelude::*, BufReader};
 
 pub fn extract(filepath: &String, _app: &tauri::AppHandle) -> Result<String, Box<dyn Error>> {
@@ -21,6 +21,10 @@ pub fn extract(filepath: &String, _app: &tauri::AppHandle) -> Result<String, Box
 pub fn extract_large_file(filepath: &String) -> Result<String, Box<dyn Error>> {
     let file_buffer = File::open(filepath)?;
     let reader = BufReader::new(file_buffer);
-    let text = reader.lines().map(|line| line.unwrap()).collect::<Vec<String>>().join("\n\n");
+    let text = reader
+        .lines()
+        .map(|line| line.unwrap())
+        .collect::<Vec<String>>()
+        .join("\n\n");
     Ok(text)
 }

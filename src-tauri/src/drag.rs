@@ -5,10 +5,7 @@
 use std::{collections::HashMap, path::PathBuf, sync::mpsc::channel};
 
 use serde::{ser::Serializer, Deserialize, Deserializer, Serialize};
-use tauri::{
-    ipc::CallbackFn,
-    AppHandle, Runtime, WebviewWindow,
-};
+use tauri::{ipc::CallbackFn, AppHandle, Runtime, WebviewWindow};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -185,40 +182,40 @@ const MIN_JSON_PARSE_LEN: usize = 10_240;
 // 2. JavaScript engines not accepting anything except another unescaped, literal single quote
 //     character to end a string that was opened with it.
 fn serialize_js_with<T: Serialize, F: FnOnce(&str) -> String>(
-  value: &T,
-  options: serialize_to_javascript::Options,
-  cb: F,
+    value: &T,
+    options: serialize_to_javascript::Options,
+    cb: F,
 ) -> Result<String> {
-  // get a raw &str representation of a serialized json value.
-  let string = serde_json::to_string(value).unwrap();
-  let raw = RawValue::from_string(string).unwrap();
+    // get a raw &str representation of a serialized json value.
+    let string = serde_json::to_string(value).unwrap();
+    let raw = RawValue::from_string(string).unwrap();
 
-  // from here we know json.len() > 1 because an empty string is not a valid json value.
-  let json = raw.get();
-  let first = json.as_bytes()[0];
+    // from here we know json.len() > 1 because an empty string is not a valid json value.
+    let json = raw.get();
+    let first = json.as_bytes()[0];
 
-  #[cfg(debug_assertions)]
-  if first == b'"' {
-    assert!(
-      json.len() < MAX_JSON_STR_LEN,
-      "passing a string larger than the max JavaScript literal string size"
-    )
-  }
-
-  let return_val = if json.len() > MIN_JSON_PARSE_LEN && (first == b'{' || first == b'[') {
-    let serialized = Serialized::new(&raw, &options).into_string();
-    // only use JSON.parse('{arg}') for arrays and objects less than the limit
-    // smaller literals do not benefit from being parsed from json
-    if serialized.len() < MAX_JSON_STR_LEN {
-      cb(&serialized)
-    } else {
-      cb(json)
+    #[cfg(debug_assertions)]
+    if first == b'"' {
+        assert!(
+            json.len() < MAX_JSON_STR_LEN,
+            "passing a string larger than the max JavaScript literal string size"
+        )
     }
-  } else {
-    cb(json)
-  };
 
-  Ok(return_val)
+    let return_val = if json.len() > MIN_JSON_PARSE_LEN && (first == b'{' || first == b'[') {
+        let serialized = Serialized::new(&raw, &options).into_string();
+        // only use JSON.parse('{arg}') for arrays and objects less than the limit
+        // smaller literals do not benefit from being parsed from json
+        if serialized.len() < MAX_JSON_STR_LEN {
+            cb(&serialized)
+        } else {
+            cb(json)
+        }
+    } else {
+        cb(json)
+    };
+
+    Ok(return_val)
 }
 
 // Formats a function name and argument to be evaluated as callback.
@@ -228,17 +225,17 @@ fn serialize_js_with<T: Serialize, F: FnOnce(&str) -> String>(
 // than 10 KiB with `JSON.parse('...')`.
 // See [json-parse-benchmark](https://github.com/GoogleChromeLabs/json-parse-benchmark).
 pub fn format_callback<T: Serialize>(function_name: CallbackFn, arg: &T) -> Result<String> {
-  serialize_js_with(arg, Default::default(), |arg| {
-    format!(
-      r#"
+    serialize_js_with(arg, Default::default(), |arg| {
+        format!(
+          r#"
     if (window["_{fn}"]) {{
       window["_{fn}"]({arg})
     }} else {{
       console.warn("[TAURI] Couldn't find callback id {fn} in window. This happens when the app is reloaded while Rust is running an asynchronous operation.")
     }}"#,
-      fn = function_name.0
-    )
-  })
+          fn = function_name.0
+        )
+    })
 }
 
 // Formats a Result type to its Promise response.

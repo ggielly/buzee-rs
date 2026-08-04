@@ -27,16 +27,11 @@ pub fn get_cached_ocr_pdf(
         .map(|row| row.text)
 }
 
-fn get_cached_ocr_row(
-    file_hash: &str,
-    conn: &mut diesel::SqliteConnection,
-) -> Option<OcrCacheRow> {
-    diesel::sql_query(
-        "SELECT text, page_count FROM ocr_cache WHERE file_hash = ?1".to_string(),
-    )
-    .bind::<diesel::sql_types::Text, _>(file_hash)
-    .get_result::<OcrCacheRow>(conn)
-    .ok()
+fn get_cached_ocr_row(file_hash: &str, conn: &mut diesel::SqliteConnection) -> Option<OcrCacheRow> {
+    diesel::sql_query("SELECT text, page_count FROM ocr_cache WHERE file_hash = ?1".to_string())
+        .bind::<diesel::sql_types::Text, _>(file_hash)
+        .get_result::<OcrCacheRow>(conn)
+        .ok()
 }
 
 #[derive(QueryableByName)]
@@ -142,15 +137,14 @@ pub fn store_ocr_result(
 /// to keep the OCR cache from growing without bound.
 pub fn prune_ocr_caches(conn: &mut diesel::SqliteConnection, max_age_days: i64) {
     // Per-page rows keyed by file path: drop those whose file is gone.
-    let stale_paths: Vec<String> = diesel::sql_query(
-        "SELECT DISTINCT file_path FROM ocr_page_cache".to_string(),
-    )
-    .load::<OcrPathRow>(conn)
-    .unwrap_or_default()
-    .into_iter()
-    .map(|row| row.file_path)
-    .filter(|path| !std::path::Path::new(path).exists())
-    .collect();
+    let stale_paths: Vec<String> =
+        diesel::sql_query("SELECT DISTINCT file_path FROM ocr_page_cache".to_string())
+            .load::<OcrPathRow>(conn)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|row| row.file_path)
+            .filter(|path| !std::path::Path::new(path).exists())
+            .collect();
 
     for path in stale_paths {
         let _ = diesel::sql_query("DELETE FROM ocr_page_cache WHERE file_path = ?1")

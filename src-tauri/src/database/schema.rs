@@ -67,11 +67,7 @@ table! {
 joinable!(body -> metadata (metadata_id));
 joinable!(document -> metadata (id));
 
-allow_tables_to_appear_in_same_query!(
-  document,
-  metadata,
-  body
-);
+allow_tables_to_appear_in_same_query!(document, metadata, body);
 
 table! {
   user_preferences (id) {

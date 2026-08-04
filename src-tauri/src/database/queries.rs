@@ -26,11 +26,11 @@
   frecency_rank = float to indicate the frecency of the document
   frecency_last_accessed = timestamp when the document was last accessed using the app
   comment = user comment added in the app
-  
+
   Note: cannot add metadata_id here because data is added to the `document` table first and then
   the metadata table gets automatically populated using triggers
 */
-pub const DOCUMENT_TABLE_CREATE_STATEMENT : &str = r#"
+pub const DOCUMENT_TABLE_CREATE_STATEMENT: &str = r#"
   CREATE TABLE IF NOT EXISTS "document" 
   (
     "id" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
@@ -57,7 +57,7 @@ pub const DOCUMENT_TABLE_CREATE_STATEMENT : &str = r#"
   source_id = id from the source table (document, email, article, website etc.)
   text = body content of the document, email, article, website etc.
 */
-pub const BODY_TABLE_CREATE_STATEMENT : &str = r#"
+pub const BODY_TABLE_CREATE_STATEMENT: &str = r#"
   CREATE TABLE IF NOT EXISTS "body" 
   (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -83,7 +83,7 @@ pub const BODY_TABLE_CREATE_STATEMENT : &str = r#"
   comment = user comment added in the app
   extra_tag = additional tag relevant to the source_table (e.g. file_type for document)
 */
-pub const METADATA_TABLE_CREATE_STATEMENT : &str = r#"
+pub const METADATA_TABLE_CREATE_STATEMENT: &str = r#"
   CREATE TABLE IF NOT EXISTS metadata (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     source_table TEXT NOT NULL,
@@ -106,7 +106,7 @@ pub const METADATA_TABLE_CREATE_STATEMENT : &str = r#"
   All fields from the metadata table are added here but only title, url and comment are indexed
   Other (UNINDEXED) fields are added to reduce transactions for search
 */
-pub const METADATA_FTS_VIRTUAL_TABLE_CREATE_STATEMENT : &str = r#"
+pub const METADATA_FTS_VIRTUAL_TABLE_CREATE_STATEMENT: &str = r#"
   CREATE VIRTUAL TABLE IF NOT EXISTS metadata_fts 
   USING fts5(
     id UNINDEXED,
@@ -130,7 +130,7 @@ pub const METADATA_FTS_VIRTUAL_TABLE_CREATE_STATEMENT : &str = r#"
   INDEXES ON DOCUMENT TABLE
   Speed up frequent lookups by path, file_type, and last_modified.
 */
-pub const DOCUMENT_INDEXES : &str = r#"
+pub const DOCUMENT_INDEXES: &str = r#"
   CREATE INDEX IF NOT EXISTS idx_document_path ON document(path);
   CREATE INDEX IF NOT EXISTS idx_document_file_type ON document(file_type);
   CREATE INDEX IF NOT EXISTS idx_document_last_modified ON document(last_modified);
@@ -145,7 +145,7 @@ pub const DOCUMENT_INDEXES : &str = r#"
   METADATA TRIGGERS
   Triggers to keep the metadata table updated when the source tables are updated
 */
-pub const TRIGGER_INSERT_DOCUMENT_METADATA : &str = r#"
+pub const TRIGGER_INSERT_DOCUMENT_METADATA: &str = r#"
   CREATE TRIGGER IF NOT EXISTS insert_document_metadata
   AFTER INSERT ON document
   BEGIN
@@ -155,7 +155,7 @@ pub const TRIGGER_INSERT_DOCUMENT_METADATA : &str = r#"
       VALUES ('document', NEW.source_domain, NEW.id, NEW.name, NEW.path, NEW.created_at, NEW.last_modified, NEW.frecency_rank, NEW.frecency_last_accessed, NEW.comment, NEW.file_type);
   END;
 "#;
-pub const TRIGGER_UPDATE_DOCUMENT_METADATA : &str = r#"
+pub const TRIGGER_UPDATE_DOCUMENT_METADATA: &str = r#"
   CREATE TRIGGER IF NOT EXISTS update_document_metadata
   AFTER UPDATE ON document
   BEGIN
@@ -195,7 +195,6 @@ pub const TRIGGER_UPDATE_DOCUMENT_METADATA : &str = r#"
 //   END;
 // "#;
 
-
 ////////////////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////// USER PREFS & APP DATA //////////////////////////////////////
@@ -203,7 +202,7 @@ pub const TRIGGER_UPDATE_DOCUMENT_METADATA : &str = r#"
 ////////////////////////////////////////////////////////////////////////////////////////////////
 
 // USER_PREFS stores user preferences
-pub const USER_PREFS_TABLE_CREATE_STATEMENT : &str = r#"
+pub const USER_PREFS_TABLE_CREATE_STATEMENT: &str = r#"
   CREATE TABLE IF NOT EXISTS "user_preferences" 
   (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
@@ -226,33 +225,33 @@ pub const USER_PREFS_TABLE_CREATE_STATEMENT : &str = r#"
   );
 "#;
 
-pub const _USER_PREFS_TABLE_ALTER_STATEMENT_V_0_2_0 : &str = r#"
+pub const _USER_PREFS_TABLE_ALTER_STATEMENT_V_0_2_0: &str = r#"
   ALTER TABLE user_preferences
   ADD COLUMN roadmap_survey_answered BOOLEAN NOT NULL DEFAULT 0;
 "#;
 
-pub const USER_PREFS_TABLE_ALTER_ADD_ENABLE_LOGS : &str = r#"
+pub const USER_PREFS_TABLE_ALTER_ADD_ENABLE_LOGS: &str = r#"
   ALTER TABLE user_preferences
   ADD COLUMN enable_logs BOOLEAN NOT NULL DEFAULT 0;
 "#;
 
-pub const USER_PREFS_TABLE_ALTER_ADD_MAX_OCR_PAGES : &str = r#"
+pub const USER_PREFS_TABLE_ALTER_ADD_MAX_OCR_PAGES: &str = r#"
   ALTER TABLE user_preferences
   ADD COLUMN pdf_max_ocr_pages BIGINT NOT NULL DEFAULT 150;
 "#;
 
-pub const USER_PREFS_TABLE_ALTER_ADD_OCR_THREADS : &str = r#"
+pub const USER_PREFS_TABLE_ALTER_ADD_OCR_THREADS: &str = r#"
   ALTER TABLE user_preferences
   ADD COLUMN ocr_threads BIGINT NOT NULL DEFAULT 1;
 "#;
 
-pub const USER_PREFS_TABLE_ALTER_ADD_OCR_SORT_ORDER : &str = r#"
+pub const USER_PREFS_TABLE_ALTER_ADD_OCR_SORT_ORDER: &str = r#"
   ALTER TABLE user_preferences
   ADD COLUMN ocr_sort_order TEXT NOT NULL DEFAULT "size_asc";
 "#;
 
 // APP_DATA stores basic app data and file type data
-pub const APP_DATA_TABLE_CREATE_STATEMENT : &str = r#"
+pub const APP_DATA_TABLE_CREATE_STATEMENT: &str = r#"
   CREATE TABLE IF NOT EXISTS "app_data" 
   (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
@@ -267,7 +266,7 @@ pub const APP_DATA_TABLE_CREATE_STATEMENT : &str = r#"
 "#;
 
 // IGNORE_LIST stores paths to ignore during scanning
-pub const IGNORE_LIST_TABLE_CREATE_STATEMENT : &str = r#"
+pub const IGNORE_LIST_TABLE_CREATE_STATEMENT: &str = r#"
   CREATE TABLE IF NOT EXISTS "ignore_list" 
   (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
@@ -278,7 +277,7 @@ pub const IGNORE_LIST_TABLE_CREATE_STATEMENT : &str = r#"
 "#;
 
 // ALLOW_LIST stores paths that the user manually adds. This list supercedes the IGNORE_LIST.
-pub const ALLOW_LIST_TABLE_CREATE_STATEMENT : &str = r#"
+pub const ALLOW_LIST_TABLE_CREATE_STATEMENT: &str = r#"
   CREATE TABLE IF NOT EXISTS "allow_list" 
   (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
@@ -288,7 +287,7 @@ pub const ALLOW_LIST_TABLE_CREATE_STATEMENT : &str = r#"
 "#;
 
 // FILE_TYPES stores file types and their categories
-pub const FILE_TYPES_TABLE_CREATE_STATEMENT : &str = r#"
+pub const FILE_TYPES_TABLE_CREATE_STATEMENT: &str = r#"
   CREATE TABLE IF NOT EXISTS "file_types" 
   (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
@@ -300,7 +299,7 @@ pub const FILE_TYPES_TABLE_CREATE_STATEMENT : &str = r#"
 "#;
 
 // OCR_CACHE stores pre-computed OCR results keyed by a fast content hash.
-pub const OCR_CACHE_TABLE_CREATE_STATEMENT : &str = r#"
+pub const OCR_CACHE_TABLE_CREATE_STATEMENT: &str = r#"
   CREATE TABLE IF NOT EXISTS "ocr_cache"
   (
     file_hash TEXT PRIMARY KEY NOT NULL,
@@ -315,7 +314,7 @@ pub const OCR_CACHE_TABLE_CREATE_STATEMENT : &str = r#"
 // Each row remembers the SHA-256 hash of the rasterized page so that a re-scan
 // re-OCRs only pages whose raster changed, skipping the (expensive) OCR of
 // unchanged pages in large documents.
-pub const OCR_PAGE_CACHE_TABLE_CREATE_STATEMENT : &str = r#"
+pub const OCR_PAGE_CACHE_TABLE_CREATE_STATEMENT: &str = r#"
   CREATE TABLE IF NOT EXISTS "ocr_page_cache"
   (
     file_path TEXT NOT NULL,
@@ -349,9 +348,9 @@ pub const OCR_PAGE_CACHE_TABLE_CREATE_STATEMENT : &str = r#"
 // attachment_count = number of attachments in the email
 // comment = user comment added in the app
 // pub const EMAIL_TABLE_CREATE_STATEMENT : &str = r#"
-//   CREATE TABLE IF NOT EXISTS "email" 
+//   CREATE TABLE IF NOT EXISTS "email"
 //   (
-//     "id" integer PRIMARY KEY AUTOINCREMENT NOT NULL, 
+//     "id" integer PRIMARY KEY AUTOINCREMENT NOT NULL,
 //     "domain" text NOT NULL,
 //     "sender" text NOT NULL,
 //     "recipient" text NOT NULL,
@@ -383,9 +382,9 @@ pub const OCR_PAGE_CACHE_TABLE_CREATE_STATEMENT : &str = r#"
 // frecency_rank = float to indicate the frecency of the bookmark/article
 // frecency_last_accessed = timestamp when the bookmark/article was last accessed using the app
 // pub const BOOKMARK_TABLE_CREATE_STATEMENT : &str = r#"
-//   CREATE TABLE IF NOT EXISTS "bookmark" 
+//   CREATE TABLE IF NOT EXISTS "bookmark"
 //   (
-//     "id" integer PRIMARY KEY AUTOINCREMENT NOT NULL, 
+//     "id" integer PRIMARY KEY AUTOINCREMENT NOT NULL,
 //     "domain" text NOT NULL,
 //     "title" text NOT NULL,
 //     "url" text NOT NULL,
@@ -411,9 +410,9 @@ pub const OCR_PAGE_CACHE_TABLE_CREATE_STATEMENT : &str = r#"
 // frecency_rank = float to indicate the frecency of the website
 // frecency_last_accessed = timestamp when the website was last accessed using the app
 // pub const WEBSITE_TABLE_CREATE_STATEMENT : &str = r#"
-//   CREATE TABLE IF NOT EXISTS "website" 
+//   CREATE TABLE IF NOT EXISTS "website"
 //   (
-//     "id" integer PRIMARY KEY AUTOINCREMENT NOT NULL, 
+//     "id" integer PRIMARY KEY AUTOINCREMENT NOT NULL,
 //     "domain" text NOT NULL,
 //     "url" text NOT NULL,
 //     "title" text,

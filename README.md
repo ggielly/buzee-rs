@@ -8,8 +8,8 @@
 ![Static Badge](https://img.shields.io/badge/Tauri%20v2-framework-blue?logo=tauri)
 ![Rust](https://img.shields.io/badge/Rust-lang-black.svg?style=flat&logo=rust)
 
-![GitHub License](https://img.shields.io/github/license/gsidhu/buzee-tauri)
-![GitHub Downloads (all assets, all releases)](https://img.shields.io/github/downloads/gsidhu/buzee-releases/total)
+![GitHub License](https://img.shields.io/github/license/ggielly/buzee-rs)
+![GitHub Downloads (all assets, all releases)](https://img.shields.io/github/downloads/ggielly/buzee-rs/total)
 
 </div>
 
@@ -19,18 +19,17 @@ Note : this version is a fork from the original unmaintained [Buzee](https://git
 
 Buzee (pronounced _boozey_) is a eight-year-old labrador retriever who can't play fetch but can love you like no other.
 
-
 Buzee is also a full-text search application for your life. It helps you find your files, effortlessly.
 
-Also, download the forked v0.2.1 from [Releases](https://github.com/ggielly/buzee-releases/releases) page.
+Also, download the forked v0.2.1 from [Releases](https://github.com/ggielly/buzee-rs/releases) page.
 
 ## Screenshots
 
 <div style="display:flex">
-  <img src="./static/Screenshot1.png" width=25% />
-  <img src="./static/Screenshot2.png" width=25% />
-  <img src="./static/Screenshot3.png" width=25% />
-  <img src="./static/Screenshot4.png" width=25% />
+  <img src="./static/Screenshot1.jpg" width=50% />
+  <img src="./static/Screenshot2.jpg" width=50% />
+  <img src="./static/Screenshot3.jpg" width=50% />
+  <img src="./static/Screenshot4.jpg" width=50% />
 </div>
 
 ## Features
@@ -92,11 +91,11 @@ Android is also supported ATM via tauri
 
 Building on Windows requires a few changes. Follow these steps:
 
-1. Remove `drag = { path = "./crates/drag", version = "0.4.0", features = [ "serde" ] }` from [`Cargo.toml`](https://github.com/ggielly/buzee-tauri/blob/main/src-tauri/Cargo.toml#L28C1-L28C77)
-2. Comment out `crate::drag::start_drag,` from [`ipc.rs`](https://github.com/ggielly/buzee-tauri/blob/main/src-tauri/src/ipc.rs#L506C7-L506C31)
-3. Comment out `mod drag;` from [`main.rs`](https://github.com/ggielly/buzee-tauri/blob/main/src-tauri/src/main.rs#L30)
+1. Remove `drag = { path = "./crates/drag", version = "0.4.0", features = [ "serde" ] }` from [`Cargo.toml`](https://github.com/ggielly/buzee-rs/blob/main/src-tauri/Cargo.toml#L28C1-L28C77)
+2. Comment out `crate::drag::start_drag,` from [`ipc.rs`](https://github.com/ggielly/buzee-rs/blob/main/src-tauri/src/ipc.rs#L506C7-L506C31)
+3. Comment out `mod drag;` from [`main.rs`](https://github.com/ggielly/buzee-rs/blob/main/src-tauri/src/main.rs#L30)
 
-Finally, replace `binaries/textra` with `binaries/winocr` in [`tauri.conf.json`](https://github.com/ggielly/buzee-tauri/blob/main/src-tauri/tauri.conf.json#L38).
+Finally, replace `binaries/textra` with `binaries/winocr` in [`tauri.conf.json`](https://github.com/ggielly/buzee-rs/blob/main/src-tauri/tauri.conf.json#L38).
 
 ---
 
@@ -132,7 +131,6 @@ Back-end:
 - Rust
 - Tauri v2
 - SQLite
-
 
 Front-end:
 

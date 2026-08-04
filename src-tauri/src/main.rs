@@ -35,6 +35,6 @@ mod utils;
 mod window;
 
 fn main() {
-  housekeeping::initialize();
-  ipc::initialize();
+    housekeeping::initialize();
+    ipc::initialize();
 }

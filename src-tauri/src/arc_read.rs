@@ -1,16 +1,17 @@
+use crate::custom_types::{Error, HistoryResult};
+use crate::database::models::DocumentSearchResult;
 use rusqlite::{Connection, Result};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::collections::HashMap;
-use crate::custom_types::{HistoryResult, Error};
-use crate::database::models::DocumentSearchResult;
 
 const DEFAULT_ARC_PROFILE_ID: &str = "Default";
 
 #[cfg(target_os = "macos")]
 const DEFAULT_ARC_PROFILE_PATH: [&str; 3] = ["Application Support", "Arc", "User Data"];
 #[cfg(target_os = "macos")]
-const DEFAULT_ARC_STATE_PATH: [&str; 4] = ["Application Support", "Arc", "User Data", "Local State"];
+const DEFAULT_ARC_STATE_PATH: [&str; 4] =
+    ["Application Support", "Arc", "User Data", "Local State"];
 
 #[cfg(target_os = "windows")]
 const DEFAULT_ARC_PROFILE_PATH: [&str; 3] = ["Roaming", "Arc", "User Data"];
@@ -23,18 +24,18 @@ fn user_library_directory_path() -> PathBuf {
 }
 
 fn get_history_db_path(profile_name: Option<&str>) -> PathBuf {
-  // get the profile id from the profile name
-  // let arc_profiles = load_arc_profiles();
-  // let profile_id = Some(arc_profiles.iter().find(|profile| profile.get("name").unwrap() == profile_name.unwrap()).unwrap().get("id").unwrap());
-  // let binding = DEFAULT_ARC_PROFILE_ID.to_string();
-  // let profile = profile_id.unwrap_or(&binding);
+    // get the profile id from the profile name
+    // let arc_profiles = load_arc_profiles();
+    // let profile_id = Some(arc_profiles.iter().find(|profile| profile.get("name").unwrap() == profile_name.unwrap()).unwrap().get("id").unwrap());
+    // let binding = DEFAULT_ARC_PROFILE_ID.to_string();
+    // let profile = profile_id.unwrap_or(&binding);
 
-  let profile = profile_name.unwrap_or(DEFAULT_ARC_PROFILE_ID);
-  let mut path = user_library_directory_path();
-  for p in DEFAULT_ARC_PROFILE_PATH.iter() {
-      path = path.join(p);
-  }
-  path.join(profile).join("History")
+    let profile = profile_name.unwrap_or(DEFAULT_ARC_PROFILE_ID);
+    let mut path = user_library_directory_path();
+    for p in DEFAULT_ARC_PROFILE_PATH.iter() {
+        path = path.join(p);
+    }
+    path.join(profile).join("History")
 }
 
 fn get_local_state_path() -> PathBuf {
@@ -66,7 +67,8 @@ fn load_arc_profiles() -> Vec<HashMap<String, String>> {
     }
 
     let arc_state = fs::read_to_string(path).expect("Could not read local state file");
-    let arc_state: serde_json::Value = serde_json::from_str(&arc_state).expect("Invalid JSON in local state file");
+    let arc_state: serde_json::Value =
+        serde_json::from_str(&arc_state).expect("Invalid JSON in local state file");
     let profiles = &arc_state["profile"]["info_cache"];
     let mut result = Vec::new();
 
@@ -87,7 +89,16 @@ fn load_arc_profiles() -> Vec<HashMap<String, String>> {
 }
 
 fn where_clauses(table_title: &str, terms: &[&str]) -> String {
-    terms.iter().map(|&term| format!("({}.title LIKE '%{}%' OR {}.url LIKE '%{}%')", table_title, term, table_title, term)).collect::<Vec<_>>().join(" AND ")
+    terms
+        .iter()
+        .map(|&term| {
+            format!(
+                "({}.title LIKE '%{}%' OR {}.url LIKE '%{}%')",
+                table_title, term, table_title, term
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ")
 }
 
 fn get_history_query(table: &str, terms: &[&str], limit: i64, offset: i64) -> String {
@@ -114,11 +125,12 @@ fn search_history(profile: &str, query: Option<&str>, limit: i64, offset: i64) -
             data: vec![],
             is_loading: false,
             error_view: Some("NotInstalledError".to_string()),
-        }
+        };
     }
 
     // create a backup of the database
-    create_copy_of_arc_history_database(profile).expect("Could not create a backup of the Arc history database");
+    create_copy_of_arc_history_database(profile)
+        .expect("Could not create a backup of the Arc history database");
 
     // connect to the backup database
     let db_path = db_path.with_file_name("HistoryBackup");
@@ -146,12 +158,7 @@ fn search_history(profile: &str, query: Option<&str>, limit: i64, offset: i64) -
     };
 
     let history_iter = match stmt.query_map([], |row| {
-      Ok((
-          row.get(0)?,
-          row.get(1)?,
-          row.get(2)?,
-          row.get(3)?,
-      ))
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
     }) {
         Ok(iter) => iter,
         Err(err) => {
@@ -173,51 +180,69 @@ fn search_history(profile: &str, query: Option<&str>, limit: i64, offset: i64) -
 }
 
 pub fn get_arc_profiles() -> Vec<String> {
-  let arc_profiles = load_arc_profiles();
-  println!("{:?}", arc_profiles);
-  let profile_names = arc_profiles.iter().map(|profile| {profile.get("name").unwrap().to_string()}).collect();
+    let arc_profiles = load_arc_profiles();
+    println!("{:?}", arc_profiles);
+    let profile_names = arc_profiles
+        .iter()
+        .map(|profile| profile.get("name").unwrap().to_string())
+        .collect();
 
-  profile_names
+    profile_names
 }
 
 fn create_copy_of_arc_history_database(profile: &str) -> Result<(), Error> {
-  let db_path = get_history_db_path(Some(profile));
-  // create a backup in the same directory
-  let backup_path = db_path.with_file_name("HistoryBackup");
-  fs::copy(&db_path, &backup_path)?;
+    let db_path = get_history_db_path(Some(profile));
+    // create a backup in the same directory
+    let backup_path = db_path.with_file_name("HistoryBackup");
+    fs::copy(&db_path, &backup_path)?;
 
-  Ok(())
+    Ok(())
 }
 
-pub fn search_arc(profile: String, user_query: String, limit: i64, page: i64) -> Result<Vec<DocumentSearchResult>, Error> {
-  let history_result = search_history(profile.as_str(), Some(user_query.as_str()), limit, limit*page);
-  println!("{:?}", history_result);
-  let search_results: Vec<DocumentSearchResult> = history_result.data.iter().map(|(_id, url, title, last_visited)| {
-    // convert last_visited to UNIX timestamp
-    let last_opened = chrono::NaiveDateTime::parse_from_str(last_visited, "%Y-%m-%d %H:%M:%S").unwrap();
-    // convert NaiveDateTime to UNIX timestamp
-    let mut last_opened = last_opened.and_utc().timestamp();
-    if last_opened == -11644453800 {
-      last_opened = 0;
-    }
-    DocumentSearchResult {
-      id: 0,
-      source_domain: "Arc".to_string(),
-      created_at: 0,
-      name: title.clone(),
-      path: url.clone(),
-      size: None,
-      file_type: "arc-webpage".to_string(),
-      last_modified: 0,
-      last_opened: last_opened,
-      last_parsed: 0,
-      last_synced: 0,
-      frecency_last_accessed: 0,
-      frecency_rank: 0.0,
-      is_pinned: false,
-      comment: None,
-    }
-  }).collect();
+pub fn search_arc(
+    profile: String,
+    user_query: String,
+    limit: i64,
+    page: i64,
+) -> Result<Vec<DocumentSearchResult>, Error> {
+    let history_result = search_history(
+        profile.as_str(),
+        Some(user_query.as_str()),
+        limit,
+        limit * page,
+    );
+    println!("{:?}", history_result);
+    let search_results: Vec<DocumentSearchResult> = history_result
+        .data
+        .iter()
+        .map(|(_id, url, title, last_visited)| {
+            // convert last_visited to UNIX timestamp
+            let last_opened =
+                chrono::NaiveDateTime::parse_from_str(last_visited, "%Y-%m-%d %H:%M:%S").unwrap();
+            // convert NaiveDateTime to UNIX timestamp
+            let mut last_opened = last_opened.and_utc().timestamp();
+            if last_opened == -11644453800 {
+                last_opened = 0;
+            }
+            DocumentSearchResult {
+                id: 0,
+                source_domain: "Arc".to_string(),
+                created_at: 0,
+                name: title.clone(),
+                path: url.clone(),
+                size: None,
+                file_type: "arc-webpage".to_string(),
+                last_modified: 0,
+                last_opened: last_opened,
+                last_parsed: 0,
+                last_synced: 0,
+                frecency_last_accessed: 0,
+                frecency_rank: 0.0,
+                is_pinned: false,
+                comment: None,
+            }
+        })
+        .collect();
 
-  Ok(search_results)
+    Ok(search_results)
 }

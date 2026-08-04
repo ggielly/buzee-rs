@@ -11,7 +11,7 @@ pub fn extract(file: &String, _app: &tauri::AppHandle) -> Result<String, Box<dyn
     let mut unique_words = Vec::new();
     for word in words {
         if !unique_words.contains(&word) {
-        unique_words.push(word);
+            unique_words.push(word);
         }
     }
     Ok(text)

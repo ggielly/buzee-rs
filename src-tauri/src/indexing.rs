@@ -1,4 +1,7 @@
-use crate::custom_types::{IgnoreAllowCacheState, OcrFailedFile, OcrRescanProgress, OcrRescanState, OcrSuccessFile, TantivyDocumentItem};
+use crate::custom_types::{
+    IgnoreAllowCacheState, OcrFailedFile, OcrRescanProgress, OcrRescanState, OcrSuccessFile,
+    TantivyDocumentItem,
+};
 use crate::database::establish_connection;
 use crate::database::models::{AllowList, BodyItem, DocumentItem, FileTypes, IgnoreList};
 use crate::database::schema::{
@@ -11,7 +14,9 @@ use crate::text_extraction::Extractor;
 use crate::user_prefs::{return_user_prefs_state, set_scan_running_status};
 use crate::utils::{self, get_metadata};
 use diesel::connection::Connection;
-use diesel::{BoolExpressionMethods, ExpressionMethods, JoinOnDsl, QueryDsl, RunQueryDsl, SqliteConnection};
+use diesel::{
+    BoolExpressionMethods, ExpressionMethods, JoinOnDsl, QueryDsl, RunQueryDsl, SqliteConnection,
+};
 use futures::{pin_mut, StreamExt};
 use ignore::{Walk, WalkBuilder};
 use std::collections::HashSet;
@@ -765,8 +770,11 @@ fn commit_index_batch(
     body_tantivy_source_ids: &mut Vec<i32>,
     body_items: &mut Vec<BodyItem>,
 ) {
-    let indexing_commit_response =
-        tantivy_index::delete_and_add_docs_to_index(app, body_tantivy_source_ids, body_tantivy_items);
+    let indexing_commit_response = tantivy_index::delete_and_add_docs_to_index(
+        app,
+        body_tantivy_source_ids,
+        body_tantivy_items,
+    );
     if indexing_commit_response.is_err() {
         log::error!(
             "Error updating Tantivy Index: {:?}",
@@ -813,7 +821,12 @@ fn emit_ocr_rescan_progress(
             return;
         }
     };
-    send_message_to_frontend(window, "ocr-rescan-progress".to_string(), message.to_string(), data);
+    send_message_to_frontend(
+        window,
+        "ocr-rescan-progress".to_string(),
+        message.to_string(),
+        data,
+    );
 }
 
 /// Shared OCR rescan engine. Runs extraction on the given candidates with a
@@ -825,7 +838,16 @@ async fn run_ocr_rescan(
     app: &tauri::AppHandle,
     window: &tauri::WebviewWindow,
     all_files_data: Vec<(
-        i32, i32, String, String, String, String, i64, i64, Option<String>, Option<f64>,
+        i32,
+        i32,
+        String,
+        String,
+        String,
+        String,
+        i64,
+        i64,
+        Option<String>,
+        Option<f64>,
     )>,
     threads: i64,
 ) -> bool {
@@ -836,7 +858,18 @@ async fn run_ocr_rescan(
     let concurrency = threads.clamp(1, 4) as usize;
 
     // Emit an initial progress message so the frontend can show a determinate bar.
-    emit_ocr_rescan_progress(window, "started", total_to_parse, 0, 0, 0, threads, "", &[], &[]);
+    emit_ocr_rescan_progress(
+        window,
+        "started",
+        total_to_parse,
+        0,
+        0,
+        0,
+        threads,
+        "",
+        &[],
+        &[],
+    );
     // Also emit the legacy scan_started event so the status bar's parsing bar
     // knows the total before the first scan_progress arrives.
     send_message_to_frontend(
@@ -889,7 +922,13 @@ async fn run_ocr_rescan(
     while let Some((file_item, text, error)) = stream.next().await {
         // Bail out as soon as a stop was requested or the background scan was
         // turned off (e.g. via the status-bar stop button).
-        if state.lock().unwrap().cancelled.load(std::sync::atomic::Ordering::SeqCst) || sync_status(app).0 == "false" {
+        if state
+            .lock()
+            .unwrap()
+            .cancelled
+            .load(std::sync::atomic::Ordering::SeqCst)
+            || sync_status(app).0 == "false"
+        {
             completed = false;
             break;
         }
@@ -1068,16 +1107,23 @@ pub async fn rescan_ocr_documents(
     // eligibility rules of parse_content_from_files). Ordered per the selected
     // sort preference.
     let all_files_data: Vec<(
-        i32, i32, String, String, String, String, i64, i64, Option<String>, Option<f64>,
+        i32,
+        i32,
+        String,
+        String,
+        String,
+        String,
+        i64,
+        i64,
+        Option<String>,
+        Option<f64>,
     )> = {
         let mut query = document::table
             .inner_join(metadata::table.on(document::id.eq(metadata::source_id)))
             .filter(
-                document::file_type
-                    .eq("pdf")
-                    .or(document::file_type
-                        .eq_any(IMAGE_FILETYPES)
-                        .and(document::size.gt(IMAGE_CUTOFF_SIZE))),
+                document::file_type.eq("pdf").or(document::file_type
+                    .eq_any(IMAGE_FILETYPES)
+                    .and(document::size.gt(IMAGE_CUTOFF_SIZE))),
             )
             .select((
                 metadata::id,
@@ -1128,16 +1174,23 @@ pub async fn rescan_ocr_files(
     let mut conn = establish_connection(app);
 
     let all_files_data: Vec<(
-        i32, i32, String, String, String, String, i64, i64, Option<String>, Option<f64>,
+        i32,
+        i32,
+        String,
+        String,
+        String,
+        String,
+        i64,
+        i64,
+        Option<String>,
+        Option<f64>,
     )> = document::table
         .inner_join(metadata::table.on(document::id.eq(metadata::source_id)))
         .filter(document::path.eq_any(&paths))
         .filter(
-            document::file_type
-                .eq("pdf")
-                .or(document::file_type
-                    .eq_any(IMAGE_FILETYPES)
-                    .and(document::size.gt(IMAGE_CUTOFF_SIZE))),
+            document::file_type.eq("pdf").or(document::file_type
+                .eq_any(IMAGE_FILETYPES)
+                .and(document::size.gt(IMAGE_CUTOFF_SIZE))),
         )
         .select((
             metadata::id,
