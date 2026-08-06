@@ -506,11 +506,6 @@ impl BuzeeApp {
             Message::ToggleMaximize => {
                 return iced::window::latest().and_then(|id| iced::window::toggle_maximize(id));
             }
-            Message::DragWindow => {
-                // `window::drag` must run while the left button is still held;
-                // it is triggered from the title bar's `mouse_area` on_press.
-                return iced::window::latest().and_then(|id| iced::window::drag(id));
-            }
             Message::Close => {
                 return iced::window::latest().and_then(|id| iced::window::close(id));
             }

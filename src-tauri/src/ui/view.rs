@@ -1,6 +1,7 @@
 //! The full Search screen, ported pixel-faithfully from the original Svelte +
 //! Tailwind/shadcn layout:
-//!   - a 36px title bar (brand mark + name, window controls),
+//!   - the native OS title bar (window controls + resizing handled by Windows),
+//!   - an in-app menu bar (File / Edit / Window / Help) with the brand mark,
 //!   - a header row with the search bar and sync-status button,
 //!   - a left sidebar (20vw),
 //!   - a filter row (Location / File type / Date range / layout toggles),
@@ -14,8 +15,8 @@ use crate::ui::theme::{ButtonKind, ContainerKind, InputKind, PickKind, TextKind,
 use crate::ui::BuzeeApp;
 use chrono::{Local, TimeZone};
 use iced::widget::{
-    button, column, container, mouse_area, pick_list, progress_bar, row, rule, scrollable,
-    text, text_input, Space, Stack,
+    button, column, container, pick_list, progress_bar, row, rule, scrollable, text,
+    text_input, Space, Stack,
 };
 use iced::{alignment, Alignment, Color, Element, Length};
 
@@ -51,7 +52,7 @@ pub fn root(app: &BuzeeApp) -> El<'_> {
     };
 
     let base: El<'_> = column![
-        title_bar(),
+        menu_bar_row(),
         header(app),
         row![sidebar(app), content].spacing(0).height(Length::Fill),
         status_bar(app),
@@ -249,45 +250,31 @@ fn scan_popup(app: &BuzeeApp) -> El<'_> {
 }
 
 // ---------------------------------------------------------------------------
-// Title bar (h-9 = 36px)
+// Menu bar (File / Edit / Window / Help) below the native title bar.
 // ---------------------------------------------------------------------------
-fn title_bar<'a>() -> El<'a> {
-    let brand = row![
-        logo_mark(16.0),
-        text("Buzee").size(14).class(TextKind::Default),
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center);
-
-    let controls = row![
-        window_button("min", Message::Minimize),
-        window_button("max", Message::ToggleMaximize),
-        window_button("×", Message::Close),
-    ]
-    .spacing(0);
-
-    // The window is undecorated, so the empty title-bar area must be draggable
-    // to move the window. `mouse_area.on_press` fires on the mouse press, which
-    // is exactly when `window::drag` needs to be triggered.
-    let drag_region =
-        mouse_area(row![brand, Space::new().width(Length::Fill)].align_y(Alignment::Center))
-            .on_press(Message::DragWindow)
-            .on_double_click(Message::ToggleMaximize);
-
+fn menu_bar_row<'a>() -> El<'a> {
     container(
-        row![menu_bar(), drag_region, controls]
-            .spacing(0)
+        row![
+            menu_bar(),
+            Space::new().width(Length::Fill),
+            row![
+                logo_mark(16.0),
+                text("Buzee").size(14).class(TextKind::Default),
+            ]
+            .spacing(8)
             .align_y(Alignment::Center),
+        ]
+        .align_y(Alignment::Center),
     )
     .width(Length::Fill)
-    .height(Length::Fixed(36.0))
+    .height(Length::Fixed(32.0))
     .class(ContainerKind::TitleBar)
-    .padding(iced::Padding { top: 0.0, right: 4.0, bottom: 0.0, left: 4.0 })
+    .padding(iced::Padding { top: 0.0, right: 12.0, bottom: 0.0, left: 4.0 })
     .into()
 }
 
-/// The File / Edit / Window / Help menu bar, rendered as compact dropdowns
-/// (pick lists) that overlay the content below the title bar when opened.
+/// The File / Edit / Window / Help dropdowns, rendered as compact pick lists
+/// that overlay the content below the menu bar when opened.
 fn menu_bar<'a>() -> El<'a> {
     row![
         menu_pick("File", &["Close Window", "Quit"], |s| match s {
@@ -332,18 +319,6 @@ fn menu_pick<'a>(
         .padding([4, 8])
         .text_size(13)
         .width(Length::Fixed(width))
-        .into()
-}
-
-fn window_button<'a>(label: &'a str, msg: Message) -> El<'a> {
-    let is_close = label == "×";
-    let kind = if is_close { ButtonKind::Danger } else { ButtonKind::Ghost };
-    let color = if is_close { TextKind::White } else { TextKind::Muted };
-    button(text(label).size(14).class(color))
-        .on_press(msg)
-        .class(kind)
-        .width(Length::Fixed(40.0))
-        .height(Length::Fixed(26.0))
         .into()
 }
 

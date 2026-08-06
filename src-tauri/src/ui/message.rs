@@ -37,12 +37,10 @@ pub enum Message {
     /// Run a search with an explicit query (used by the suggestions list).
     SearchSuggestionSelected(String),
     Close,
-    /// Minimize the window (custom title-bar button).
+    /// Minimize the window (Window menu).
     Minimize,
-    /// Toggle the window between maximized and restored (custom title-bar button).
+    /// Toggle the window between maximized and restored (Window menu).
     ToggleMaximize,
-    /// Start dragging the (undecorated) window from the custom title bar.
-    DragWindow,
     /// Hard-quit the application.
     Quit,
     /// Edit menu: undo the last change to the search field.
