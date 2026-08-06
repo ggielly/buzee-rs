@@ -378,7 +378,16 @@ impl BuzeeApp {
         match message {
             Message::Tick => self.tick(),
             Message::SearchInputChanged(value) => {
-                self.state.search_input = value.clone();
+                // Keep a bounded undo history for the Edit menu.
+                if self.state.search_input != value {
+                    self.state
+                        .edit_undo
+                        .push(std::mem::replace(&mut self.state.search_input, value.clone()));
+                    if self.state.edit_undo.len() > 50 {
+                        self.state.edit_undo.remove(0);
+                    }
+                    self.state.edit_redo.clear();
+                }
                 // Queue the query for the debounced suggestion request (sent on
                 // the next Tick). An empty/too-short query cancels any pending one.
                 self.state.pending_suggestions = if value.chars().count() >= 3 {
@@ -489,9 +498,71 @@ impl BuzeeApp {
                     iced::widget::operation::AbsoluteOffset { x: offset.x, y: 0.0 },
                 );
             }
+            Message::Minimize => {
+                // The main window id isn't exposed as a constant in iced 0.14,
+                // so resolve it from the single-window app and minimize it.
+                return iced::window::latest().and_then(|id| iced::window::minimize(id, true));
+            }
+            Message::ToggleMaximize => {
+                return iced::window::latest().and_then(|id| iced::window::toggle_maximize(id));
+            }
+            Message::DragWindow => {
+                // `window::drag` must run while the left button is still held;
+                // it is triggered from the title bar's `mouse_area` on_press.
+                return iced::window::latest().and_then(|id| iced::window::drag(id));
+            }
             Message::Close => {
+                return iced::window::latest().and_then(|id| iced::window::close(id));
+            }
+            Message::Quit => {
                 std::process::exit(0);
             }
+            Message::EditUndo => {
+                if let Some(previous) = self.state.edit_undo.pop() {
+                    self.state.edit_redo.push(std::mem::replace(
+                        &mut self.state.search_input,
+                        previous,
+                    ));
+                }
+            }
+            Message::EditRedo => {
+                if let Some(next) = self.state.edit_redo.pop() {
+                    self.state.edit_undo.push(std::mem::replace(
+                        &mut self.state.search_input,
+                        next,
+                    ));
+                }
+            }
+            Message::EditCut => {
+                let text = std::mem::take(&mut self.state.search_input);
+                if !text.is_empty() {
+                    self.state.edit_undo.push(String::new());
+                    self.state.edit_redo.clear();
+                    return iced::clipboard::write::<Message>(text);
+                }
+            }
+            Message::EditCopy => {
+                let text = self.state.search_input.clone();
+                if !text.is_empty() {
+                    return iced::clipboard::write::<Message>(text);
+                }
+            }
+            Message::EditPaste => {
+                return iced::clipboard::read().map(Message::ClipboardRead);
+            }
+            Message::ClipboardRead(content) => {
+                if let Some(text) = content {
+                    if !text.is_empty() {
+                        self.state.edit_undo.push(std::mem::replace(
+                            &mut self.state.search_input,
+                            text,
+                        ));
+                        self.state.edit_redo.clear();
+                    }
+                }
+            }
+            Message::OpenAbout => self.state.show_about = true,
+            Message::CloseAbout => self.state.show_about = false,
             Message::ToggleSync => {
                 self.services.sync.run_sync(false, Vec::new(), false, true);
             }

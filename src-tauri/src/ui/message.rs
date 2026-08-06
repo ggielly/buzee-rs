@@ -37,6 +37,30 @@ pub enum Message {
     /// Run a search with an explicit query (used by the suggestions list).
     SearchSuggestionSelected(String),
     Close,
+    /// Minimize the window (custom title-bar button).
+    Minimize,
+    /// Toggle the window between maximized and restored (custom title-bar button).
+    ToggleMaximize,
+    /// Start dragging the (undecorated) window from the custom title bar.
+    DragWindow,
+    /// Hard-quit the application.
+    Quit,
+    /// Edit menu: undo the last change to the search field.
+    EditUndo,
+    /// Edit menu: redo the last undone change to the search field.
+    EditRedo,
+    /// Edit menu: copy the search field text to the clipboard and clear it.
+    EditCut,
+    /// Edit menu: copy the search field text to the clipboard.
+    EditCopy,
+    /// Edit menu: paste the clipboard content into the search field.
+    EditPaste,
+    /// The content read from the clipboard (produced by [`Message::EditPaste`]).
+    ClipboardRead(Option<String>),
+    /// Open the About dialog.
+    OpenAbout,
+    /// Dismiss the About dialog.
+    CloseAbout,
     ToggleSync,
     StartOcr,
     StopOcr,

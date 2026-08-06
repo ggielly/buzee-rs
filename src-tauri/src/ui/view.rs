@@ -14,8 +14,8 @@ use crate::ui::theme::{ButtonKind, ContainerKind, InputKind, PickKind, TextKind,
 use crate::ui::BuzeeApp;
 use chrono::{Local, TimeZone};
 use iced::widget::{
-    button, column, container, pick_list, progress_bar, row, rule, scrollable, text,
-    text_input, Space,
+    button, column, container, mouse_area, pick_list, progress_bar, row, rule, scrollable,
+    text, text_input, Space, Stack,
 };
 use iced::{alignment, Alignment, Color, Element, Length};
 
@@ -50,14 +50,81 @@ pub fn root(app: &BuzeeApp) -> El<'_> {
         Screen::Tips => crate::ui::screens::tips_view(app),
     };
 
-    column![
+    let base: El<'_> = column![
         title_bar(),
         header(app),
         row![sidebar(app), content].spacing(0).height(Length::Fill),
         status_bar(app),
     ]
     .height(Length::Fill)
-    .into()
+    .into();
+
+    if app.state.show_about {
+        about_overlay(base)
+    } else {
+        base
+    }
+}
+
+// ---------------------------------------------------------------------------
+// About dialog (modal over the whole UI).
+// ---------------------------------------------------------------------------
+fn about_overlay<'a>(content: Element<'a, Message, Theme>) -> Element<'a, Message, Theme> {
+    let row_item = |label: &'a str, value: &'a str| -> El<'a> {
+        row![
+            text(label).size(13).class(TextKind::Muted),
+            Space::new().width(Length::Fill),
+            text(value).size(13).class(TextKind::Default),
+        ]
+        .align_y(Alignment::Center)
+        .into()
+    };
+
+    let card = container(
+        column![
+            row![logo_mark(32.0), text("Buzee").size(20).class(TextKind::Default)]
+                .spacing(10)
+                .align_y(Alignment::Center),
+            text("Find your documents, effortlessly")
+                .size(13)
+                .class(TextKind::Muted),
+            Space::new().height(2),
+            rule::horizontal(1),
+            row_item("Version", env!("CARGO_PKG_VERSION")),
+            row_item("License", "MIT"),
+            Space::new().height(8),
+            button(text("Close").size(13).class(TextKind::OnPrimary))
+                .on_press(Message::CloseAbout)
+                .class(ButtonKind::Primary)
+                .width(Length::Fill)
+                .padding([8, 16]),
+        ]
+        .spacing(10)
+        .width(Length::Fill),
+    )
+    .width(Length::Fixed(360.0))
+    .padding(24)
+    .class(ContainerKind::Card);
+
+    let centered = container(card)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(alignment::Horizontal::Center)
+        .align_y(alignment::Vertical::Center);
+
+    // Invisible click-catcher: clicking anywhere outside the card dismisses it.
+    let backdrop =
+        iced::widget::button::<Message, Theme, iced::Renderer>(iced::widget::Space::new())
+            .on_press(Message::CloseAbout)
+            .class(ButtonKind::Ghost)
+            .width(Length::Fill)
+            .height(Length::Fill);
+
+    Stack::<Message, Theme, iced::Renderer>::new()
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .extend([content, backdrop.into(), centered.into()])
+        .into()
 }
 
 // ---------------------------------------------------------------------------
@@ -193,28 +260,87 @@ fn title_bar<'a>() -> El<'a> {
     .align_y(Alignment::Center);
 
     let controls = row![
-        window_button("min"),
-        window_button("max"),
-        window_button("×"),
+        window_button("min", Message::Minimize),
+        window_button("max", Message::ToggleMaximize),
+        window_button("×", Message::Close),
     ]
     .spacing(0);
 
+    // The window is undecorated, so the empty title-bar area must be draggable
+    // to move the window. `mouse_area.on_press` fires on the mouse press, which
+    // is exactly when `window::drag` needs to be triggered.
+    let drag_region =
+        mouse_area(row![brand, Space::new().width(Length::Fill)].align_y(Alignment::Center))
+            .on_press(Message::DragWindow)
+            .on_double_click(Message::ToggleMaximize);
+
     container(
-        row![brand, Space::new().width(Length::Fill), controls].align_y(Alignment::Center),
+        row![menu_bar(), drag_region, controls]
+            .spacing(0)
+            .align_y(Alignment::Center),
     )
     .width(Length::Fill)
     .height(Length::Fixed(36.0))
     .class(ContainerKind::TitleBar)
-    .padding(iced::Padding { top: 0.0, right: 4.0, bottom: 0.0, left: 12.0 })
+    .padding(iced::Padding { top: 0.0, right: 4.0, bottom: 0.0, left: 4.0 })
     .into()
 }
 
-fn window_button<'a>(label: &'a str) -> El<'a> {
+/// The File / Edit / Window / Help menu bar, rendered as compact dropdowns
+/// (pick lists) that overlay the content below the title bar when opened.
+fn menu_bar<'a>() -> El<'a> {
+    row![
+        menu_pick("File", &["Close Window", "Quit"], |s| match s {
+            "Close Window" => Message::Close,
+            _ => Message::Quit,
+        }, 56.0),
+        // The Edit commands operate on the search field (the main text input):
+        // undo/redo walk the field's history, cut/copy write the current text to
+        // the clipboard and paste inserts the clipboard content. The native
+        // Ctrl+Z/Y/X/C/V shortcuts keep working for every text field.
+        menu_pick("Edit", &["Undo", "Redo", "Cut", "Copy", "Paste"], |s| match s {
+            "Undo" => Message::EditUndo,
+            "Redo" => Message::EditRedo,
+            "Cut" => Message::EditCut,
+            "Copy" => Message::EditCopy,
+            _ => Message::EditPaste,
+        }, 52.0),
+        menu_pick("Window", &["Minimize", "Maximize", "Close Window"], |s| match s {
+            "Minimize" => Message::Minimize,
+            "Maximize" => Message::ToggleMaximize,
+            _ => Message::Close,
+        }, 78.0),
+        menu_pick("Help", &["About Buzee"], |_s| Message::OpenAbout, 56.0),
+    ]
+    .spacing(2)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+/// A single dropdown menu: the button always shows `label` (as a placeholder,
+/// because the selected value stays `None`) while the options are the menu
+/// entries and `on_select` dispatches the chosen command.
+fn menu_pick<'a>(
+    label: &'a str,
+    options: &'a [&'a str],
+    on_select: impl Fn(&'a str) -> Message + 'a,
+    width: f32,
+) -> El<'a> {
+    pick_list(options, None::<&'a str>, on_select)
+        .placeholder(label)
+        .class(PickKind::Menu)
+        .padding([4, 8])
+        .text_size(13)
+        .width(Length::Fixed(width))
+        .into()
+}
+
+fn window_button<'a>(label: &'a str, msg: Message) -> El<'a> {
     let is_close = label == "×";
     let kind = if is_close { ButtonKind::Danger } else { ButtonKind::Ghost };
     let color = if is_close { TextKind::White } else { TextKind::Muted };
     button(text(label).size(14).class(color))
-        .on_press(if is_close { Message::Close } else { Message::Noop })
+        .on_press(msg)
         .class(kind)
         .width(Length::Fixed(40.0))
         .height(Length::Fixed(26.0))

@@ -731,6 +731,9 @@ impl Theme {
 pub enum PickKind {
     #[default]
     Default,
+    /// Flat menu-bar button (File / Edit / Window / Help): blends into the
+    /// title bar and uses the foreground colour so the label reads as text.
+    Menu,
 }
 
 widget_class_status!(PickClass, PickKind, pick_list::Catalog, pick_list::Style, pick_list, StyleFn, pick_list::Status, pick_style);
@@ -747,14 +750,23 @@ impl Theme {
         }
     }
 
-    fn pick_active(&self, _kind: PickKind) -> pick_list::Style {
+    fn pick_active(&self, kind: PickKind) -> pick_list::Style {
         let p = self.palette();
-        pick_list::Style {
-            text_color: p.foreground,
-            placeholder_color: p.muted_foreground,
-            handle_color: p.muted_foreground,
-            background: p.secondary.into(),
-            border: Border { color: p.border, width: 1.0, radius: 4.into() },
+        match kind {
+            PickKind::Menu => pick_list::Style {
+                text_color: p.foreground,
+                placeholder_color: p.foreground,
+                handle_color: p.muted_foreground,
+                background: p.title_bar.into(),
+                border: Border { color: p.border, width: 0.0, radius: 4.into() },
+            },
+            PickKind::Default => pick_list::Style {
+                text_color: p.foreground,
+                placeholder_color: p.muted_foreground,
+                handle_color: p.muted_foreground,
+                background: p.secondary.into(),
+                border: Border { color: p.border, width: 1.0, radius: 4.into() },
+            },
         }
     }
 }

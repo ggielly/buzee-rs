@@ -70,6 +70,13 @@ fn main() -> iced::Result {
     .subscription(BuzeeApp::subscription)
     .theme(BuzeeApp::theme)
     .scale_factor(|_| 1.0)
+    // The app draws its own title bar (menu bar + window controls), so the OS
+    // decorations must be hidden — otherwise Windows renders a second title
+    // bar with duplicate minimize / maximize / close buttons.
+    .window(iced::window::Settings {
+        decorations: false,
+        ..iced::window::Settings::default()
+    })
     .default_font(buzee::ui::fonts::BODY)
     .font(buzee::ui::fonts::BODY_BYTES)
     .font(buzee::ui::fonts::ICONS_BYTES)

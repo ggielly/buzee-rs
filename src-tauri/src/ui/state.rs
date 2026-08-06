@@ -106,6 +106,12 @@ pub struct BuzeeUiState {
     pub selected_index: usize,
     pub show_location_menu: bool,
     pub screen: Screen,
+    /// Undo history for the search field (Edit menu).
+    pub edit_undo: Vec<String>,
+    /// Redo history for the search field (Edit menu).
+    pub edit_redo: Vec<String>,
+    /// Whether the About dialog is visible.
+    pub show_about: bool,
     /// Pending text input for the ignore-list "add" form.
     pub ignore_input: String,
     /// Pending text input for the extract-text screen.
@@ -187,6 +193,9 @@ impl BuzeeUiState {
             selected_index: 0,
             show_location_menu: true,
             screen: Screen::Dashboard,
+            edit_undo: vec![],
+            edit_redo: vec![],
+            show_about: false,
             ignore_input: String::new(),
             extract_input: String::new(),
             extract_output: None,
