@@ -1,0 +1,425 @@
+/*
+  SCHEMA LOGIC
+  There are seven parts to the schema:
+  1. `metadata`: A centralised metadata table that stores common metadata fields from all types of sources
+  2. Individual tables for each data source that store common metadata + source-specific metadata (e.g. `document`, `email`, `bookmark`, `website` etc.)
+  3. `body`: A table that stores content/body/text from all data sources in chunks. So text for each row in an individual table may be divided into multiple rows in this table.
+  4. A FTS virtual table mapped to the `metadata` table.
+  5. A FTS virtual table mapped to the `body` table.
+  6. Triggers to keep the metadata and metadata_fts table updated when the source tables are updated.
+  7. Triggers to keep the Body FTS virtual table updated when the body table is updated.
+
+  Note: The search will run over the FTS tables.
+
+  The source tables and the `body` table are updated from the app. The `metadata` table and the FTS virtual tables are updated using triggers only.
+
+  Once other source tables are setup, perhaps individual FTS tables could be setup for each source table. This way the user can trigger a search over a specific domain.
+*/
+
+/*
+  DOCUMENT TABLE
+  source_domain = "local", "google_drive", "onedrive", "dropbox" etc.
+  created_at = timestamp when the item was created on the source
+  name, path, size, file_type, last_modified, last_opened : metadata of the document
+  last_synced = timestamp when the item was last synced with the local database
+  is_pinned = boolean to indicate if the document is pinned by the user in the app
+  frecency_rank = float to indicate the frecency of the document
+  frecency_last_accessed = timestamp when the document was last accessed using the app
+  comment = user comment added in the app
+
+  Note: cannot add metadata_id here because data is added to the `document` table first and then
+  the metadata table gets automatically populated using triggers
+*/
+pub const DOCUMENT_TABLE_CREATE_STATEMENT: &str = r#"
+  CREATE TABLE IF NOT EXISTS "document" 
+  (
+    "id" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    "source_domain" TEXT NOT NULL,
+    "created_at" BIGINT NOT NULL,
+    "name" TEXT NOT NULL,
+    "path" TEXT NOT NULL,
+    "size" INTEGER,
+    "file_type" TEXT NOT NULL,
+    "last_modified" BIGINT NOT NULL,
+    "last_opened" BIGINT NOT NULL DEFAULT 0,
+    "last_synced" BIGINT NOT NULL DEFAULT 0,
+    "last_parsed" BIGINT NOT NULL DEFAULT 0,
+    "is_pinned" BOOLEAN NOT NULL DEFAULT 0,
+    "frecency_rank" REAL NOT NULL DEFAULT 0,
+    "frecency_last_accessed" BIGINT,
+    "comment" TEXT
+  );
+"#;
+
+/*
+  BODY TABLE (for all sources)
+  metadata_id = id from the metadata table
+  source_id = id from the source table (document, email, article, website etc.)
+  text = body content of the document, email, article, website etc.
+*/
+pub const BODY_TABLE_CREATE_STATEMENT: &str = r#"
+  CREATE TABLE IF NOT EXISTS "body" 
+  (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    metadata_id INTEGER NOT NULL,
+    source_id INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    last_parsed BIGINT NOT NULL DEFAULT 0,
+    FOREIGN KEY (metadata_id) REFERENCES metadata(id)
+  );
+"#;
+
+/*
+  METADATA TABLE
+  source_table = "document", "email", "bookmark", "website" etc.
+  source_domain = "local", "google_drive", "dropbox", "gmail", "outlook", "pocket", "instapaper" etc.
+  source_id = id from the source table (document, email, article, website etc.)
+  title = title of the document, email, article, website etc.
+  url = url or path
+  created_at = timestamp when the item was created on the source
+  last_modified = timestamp when the item was last modified on the source
+  frecency_rank = float to indicate the frecency of the item
+  frecency_last_accessed = timestamp when the item was last accessed using the app
+  comment = user comment added in the app
+  extra_tag = additional tag relevant to the source_table (e.g. file_type for document)
+*/
+pub const METADATA_TABLE_CREATE_STATEMENT: &str = r#"
+  CREATE TABLE IF NOT EXISTS metadata (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_table TEXT NOT NULL,
+    source_domain TEXT NOT NULL,
+    source_id INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    url TEXT NOT NULL,
+    created_at BIGINT NOT NULL,
+    last_modified BIGINT NOT NULL,
+    frecency_rank REAL NOT NULL DEFAULT 0,
+    frecency_last_accessed BIGINT,
+    comment TEXT,
+    extra_tag TEXT NOT NULL,
+    FOREIGN KEY (source_id) REFERENCES document(id)
+  );
+"#;
+
+/*
+  METADATA FTS VIRTUAL TABLE
+  All fields from the metadata table are added here but only title, url and comment are indexed
+  Other (UNINDEXED) fields are added to reduce transactions for search
+*/
+pub const METADATA_FTS_VIRTUAL_TABLE_CREATE_STATEMENT: &str = r#"
+  CREATE VIRTUAL TABLE IF NOT EXISTS metadata_fts 
+  USING fts5(
+    id UNINDEXED,
+    source_table UNINDEXED,
+    source_domain,
+    source_id UNINDEXED,
+    title,
+    url,
+    created_at UNINDEXED,
+    last_modified UNINDEXED,
+    frecency_rank UNINDEXED,
+    frecency_last_accessed UNINDEXED,
+    comment,
+    extra_tag,
+    content=metadata,
+    tokenize="porter unicode61"
+  );
+"#;
+
+/*
+  INDEXES ON DOCUMENT TABLE
+  Speed up frequent lookups by path, file_type, and last_modified.
+*/
+pub const DOCUMENT_INDEXES: &str = r#"
+  CREATE INDEX IF NOT EXISTS idx_document_path ON document(path);
+  CREATE INDEX IF NOT EXISTS idx_document_file_type ON document(file_type);
+  CREATE INDEX IF NOT EXISTS idx_document_last_modified ON document(last_modified);
+  CREATE INDEX IF NOT EXISTS idx_document_last_parsed ON document(last_parsed);
+  CREATE INDEX IF NOT EXISTS idx_document_is_pinned ON document(is_pinned);
+  CREATE INDEX IF NOT EXISTS idx_metadata_source_id ON metadata(source_id);
+  CREATE INDEX IF NOT EXISTS idx_body_source_id ON body(source_id);
+  CREATE INDEX IF NOT EXISTS idx_body_metadata_id ON body(metadata_id);
+"#;
+
+/*
+  METADATA TRIGGERS
+  Triggers to keep the metadata table updated when the source tables are updated
+*/
+pub const TRIGGER_INSERT_DOCUMENT_METADATA: &str = r#"
+  CREATE TRIGGER IF NOT EXISTS insert_document_metadata
+  AFTER INSERT ON document
+  BEGIN
+      INSERT INTO metadata (source_table, source_domain, source_id, title, url, created_at, last_modified, frecency_rank, frecency_last_accessed, comment, extra_tag)
+      VALUES ('document', NEW.source_domain, NEW.id, NEW.name, NEW.path, NEW.created_at, NEW.last_modified, NEW.frecency_rank, NEW.frecency_last_accessed, NEW.comment, NEW.file_type);
+      INSERT INTO metadata_fts (source_table, source_domain, source_id, title, url, created_at, last_modified, frecency_rank, frecency_last_accessed, comment, extra_tag)
+      VALUES ('document', NEW.source_domain, NEW.id, NEW.name, NEW.path, NEW.created_at, NEW.last_modified, NEW.frecency_rank, NEW.frecency_last_accessed, NEW.comment, NEW.file_type);
+  END;
+"#;
+pub const TRIGGER_UPDATE_DOCUMENT_METADATA: &str = r#"
+  CREATE TRIGGER IF NOT EXISTS update_document_metadata
+  AFTER UPDATE ON document
+  BEGIN
+      UPDATE metadata
+      SET source_domain = NEW.source_domain,
+          source_id = NEW.id,
+          title = NEW.name,
+          url = NEW.path,
+          created_at = NEW.created_at,
+          last_modified = NEW.last_modified,
+          frecency_rank = NEW.frecency_rank,
+          frecency_last_accessed = NEW.frecency_last_accessed,
+          comment = NEW.comment,
+          extra_tag = NEW.file_type
+      WHERE source_table = 'document' AND source_id = OLD.id;
+      UPDATE metadata_fts
+      SET source_domain = NEW.source_domain,
+          source_id = NEW.id,
+          title = NEW.name,
+          url = NEW.path,
+          created_at = NEW.created_at,
+          last_modified = NEW.last_modified,
+          frecency_rank = NEW.frecency_rank,
+          frecency_last_accessed = NEW.frecency_last_accessed,
+          comment = NEW.comment,
+          extra_tag = NEW.file_type
+      WHERE source_table = 'document' AND source_id = OLD.id;
+  END;
+"#;
+// pub const TRIGGER_DELETE_DOCUMENT_METADATA : &str = r#"
+//   CREATE TRIGGER IF NOT EXISTS delete_document_metadata
+//   BEFORE DELETE ON document
+//   BEGIN
+//       DELETE FROM body WHERE metadata_id = (SELECT id FROM metadata WHERE source_table = 'document' AND source_id = OLD.id);
+//       DELETE FROM metadata WHERE source_table = 'document' AND source_id = OLD.id;
+//       DELETE FROM metadata_fts WHERE source_table = 'document' AND source_id = OLD.id;
+//   END;
+// "#;
+
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////// USER PREFS & APP DATA //////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+
+// USER_PREFS stores user preferences
+pub const USER_PREFS_TABLE_CREATE_STATEMENT: &str = r#"
+  CREATE TABLE IF NOT EXISTS "user_preferences" 
+  (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    first_launch_done BOOLEAN NOT NULL DEFAULT 0,
+    onboarding_done BOOLEAN NOT NULL DEFAULT 0,
+    show_search_suggestions BOOLEAN NOT NULL DEFAULT 0,
+    launch_at_startup BOOLEAN NOT NULL DEFAULT 0,
+    show_in_dock BOOLEAN NOT NULL DEFAULT 1,
+    global_shortcut_enabled BOOLEAN NOT NULL DEFAULT 1,
+    global_shortcut TEXT NOT NULL DEFAULT "Alt+Space",
+    automatic_background_sync BOOLEAN NOT NULL DEFAULT 1,
+    detailed_scan BOOLEAN NOT NULL DEFAULT 1,
+    roadmap_survey_answered BOOLEAN NOT NULL DEFAULT 0,
+    parse_pdfs BOOLEAN NOT NULL DEFAULT 1,
+    manual_setup BOOLEAN NOT NULL DEFAULT 0,
+    enable_logs BOOLEAN NOT NULL DEFAULT 0,
+    pdf_max_ocr_pages BIGINT NOT NULL DEFAULT 150,
+    ocr_threads BIGINT NOT NULL DEFAULT 1,
+    ocr_sort_order TEXT NOT NULL DEFAULT "size_asc"
+  );
+"#;
+
+pub const _USER_PREFS_TABLE_ALTER_STATEMENT_V_0_2_0: &str = r#"
+  ALTER TABLE user_preferences
+  ADD COLUMN roadmap_survey_answered BOOLEAN NOT NULL DEFAULT 0;
+"#;
+
+pub const USER_PREFS_TABLE_ALTER_ADD_ENABLE_LOGS: &str = r#"
+  ALTER TABLE user_preferences
+  ADD COLUMN enable_logs BOOLEAN NOT NULL DEFAULT 0;
+"#;
+
+pub const USER_PREFS_TABLE_ALTER_ADD_MAX_OCR_PAGES: &str = r#"
+  ALTER TABLE user_preferences
+  ADD COLUMN pdf_max_ocr_pages BIGINT NOT NULL DEFAULT 150;
+"#;
+
+pub const USER_PREFS_TABLE_ALTER_ADD_OCR_THREADS: &str = r#"
+  ALTER TABLE user_preferences
+  ADD COLUMN ocr_threads BIGINT NOT NULL DEFAULT 1;
+"#;
+
+pub const USER_PREFS_TABLE_ALTER_ADD_OCR_SORT_ORDER: &str = r#"
+  ALTER TABLE user_preferences
+  ADD COLUMN ocr_sort_order TEXT NOT NULL DEFAULT "size_asc";
+"#;
+
+// APP_DATA stores basic app data and file type data
+pub const APP_DATA_TABLE_CREATE_STATEMENT: &str = r#"
+  CREATE TABLE IF NOT EXISTS "app_data" 
+  (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    app_name TEXT NOT NULL DEFAULT "Buzee",
+    app_version TEXT NOT NULL DEFAULT "0.1.0",
+    app_mode TEXT NOT NULL DEFAULT "window",
+    app_theme TEXT NOT NULL DEFAULT "system",
+    app_language TEXT NOT NULL DEFAULT "en",
+    last_scan_time BIGINT NOT NULL DEFAULT 0,
+    scan_running BOOLEAN NOT NULL DEFAULT 0
+  );
+"#;
+
+// IGNORE_LIST stores paths to ignore during scanning
+pub const IGNORE_LIST_TABLE_CREATE_STATEMENT: &str = r#"
+  CREATE TABLE IF NOT EXISTS "ignore_list" 
+  (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    path TEXT NOT NULL,
+    is_folder BOOLEAN NOT NULL DEFAULT 0,
+    ignore_indexing BOOLEAN NOT NULL DEFAULT 0
+  );
+"#;
+
+// ALLOW_LIST stores paths that the user manually adds. This list supercedes the IGNORE_LIST.
+pub const ALLOW_LIST_TABLE_CREATE_STATEMENT: &str = r#"
+  CREATE TABLE IF NOT EXISTS "allow_list" 
+  (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    path TEXT NOT NULL,
+    is_folder BOOLEAN NOT NULL DEFAULT 0
+  );
+"#;
+
+// FILE_TYPES stores file types and their categories
+pub const FILE_TYPES_TABLE_CREATE_STATEMENT: &str = r#"
+  CREATE TABLE IF NOT EXISTS "file_types" 
+  (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    added_by_user BOOLEAN NOT NULL DEFAULT 0,
+    file_type TEXT NOT NULL DEFAULT "",
+    file_type_category TEXT NOT NULL DEFAULT "",
+    file_type_allowed BOOLEAN NOT NULL DEFAULT 1
+  );
+"#;
+
+// OCR_CACHE stores pre-computed OCR results keyed by a fast content hash.
+pub const OCR_CACHE_TABLE_CREATE_STATEMENT: &str = r#"
+  CREATE TABLE IF NOT EXISTS "ocr_cache"
+  (
+    file_hash TEXT PRIMARY KEY NOT NULL,
+    text TEXT NOT NULL,
+    page_count INTEGER NOT NULL DEFAULT 0,
+    language_tag TEXT,
+    created_at BIGINT NOT NULL DEFAULT 0
+  );
+"#;
+
+// OCR_PAGE_CACHE stores per-page OCR results keyed by (file path, page index).
+// Each row remembers the SHA-256 hash of the rasterized page so that a re-scan
+// re-OCRs only pages whose raster changed, skipping the (expensive) OCR of
+// unchanged pages in large documents.
+pub const OCR_PAGE_CACHE_TABLE_CREATE_STATEMENT: &str = r#"
+  CREATE TABLE IF NOT EXISTS "ocr_page_cache"
+  (
+    file_path TEXT NOT NULL,
+    page_index INTEGER NOT NULL,
+    page_raster_hash TEXT NOT NULL,
+    page_text TEXT NOT NULL,
+    created_at BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (file_path, page_index)
+  );
+"#;
+
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////// OTHER DOMAINS /////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////
+
+// domain = "gmail", "outlook", "yahoo", "icloud" etc.
+// sender = email address of the sender
+// recipient = email address of the recipient(s)
+// subject = subject of the email
+// sent_at = timestamp when the email was sent
+// sent_or_received_at = timestamp when the email was sent/received
+// is_read = boolean to indicate if the email is read
+// is_starred = boolean to indicate if the email is starred
+// is_archived = boolean to indicate if the email is archived
+// frecency_rank = float to indicate the frecency of the email
+// frecency_last_accessed = timestamp when the email was last accessed using the app
+// thread_id = id of the email thread (to group emails in a thread)
+// label = label/folder of the email set by the user on the domain
+// attachment_count = number of attachments in the email
+// comment = user comment added in the app
+// pub const EMAIL_TABLE_CREATE_STATEMENT : &str = r#"
+//   CREATE TABLE IF NOT EXISTS "email"
+//   (
+//     "id" integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+//     "domain" text NOT NULL,
+//     "sender" text NOT NULL,
+//     "recipient" text NOT NULL,
+//     "subject" text,
+//     "sent_or_received_at" BIGINT,
+//     "is_read" BOOLEAN NOT NULL DEFAULT 0,
+//     "is_starred" BOOLEAN NOT NULL DEFAULT 0,
+//     "is_archived" BOOLEAN NOT NULL DEFAULT 0,
+//     "frecency_rank" REAL NOT NULL DEFAULT 0,
+//     "frecency_last_accessed" BIGINT,
+//     "thread_id" integer,
+//     "label" text,
+//     "attachment_count" integer,
+//     "comment" text
+//   );
+// "#;
+
+// domain = "chrome_bookmarks", "firefox_bookmarks", "pocket", "instapaper", "omnivore" etc.
+// title = title of the bookmark/article
+// url = url of the bookmark/article
+// source = source of the bookmark/article
+// saved_at = timestamp when the bookmark/article was saved in the domain
+// read_at = timestamp when the bookmark/article was read in the domain
+// word_count = word count of the bookmark/article
+// is_favorite = boolean to indicate if the bookmark/article is favorite on the domain
+// is_archived = boolean to indicate if the bookmark/article is archived on the domain
+// is_read = boolean to indicate if the bookmark/article is read on the domain
+// tags = tags added to the bookmark/article on the domain
+// frecency_rank = float to indicate the frecency of the bookmark/article
+// frecency_last_accessed = timestamp when the bookmark/article was last accessed using the app
+// pub const BOOKMARK_TABLE_CREATE_STATEMENT : &str = r#"
+//   CREATE TABLE IF NOT EXISTS "bookmark"
+//   (
+//     "id" integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+//     "domain" text NOT NULL,
+//     "title" text NOT NULL,
+//     "url" text NOT NULL,
+//     "source" text,
+//     "saved_at" BIGINT NOT NULL,
+//     "read_at" BIGINT,
+//     "word_count" integer,
+//     "is_favorite" BOOLEAN NOT NULL DEFAULT 0,
+//     "is_archived" BOOLEAN NOT NULL DEFAULT 0,
+//     "is_read" BOOLEAN NOT NULL DEFAULT 0,
+//     "tags" text,
+//     "frecency_rank" REAL NOT NULL DEFAULT 0,
+//     "frecency_last_accessed" BIGINT,
+//     "comment" text
+//   );
+// "#;
+
+// domain = "chrome_history", "firefox_history", "safari_history", "edge_history", "newsletters", "rss_feeds", "podcasts",
+// url = url of the website
+// title = title of the website
+// last_visit_time = timestamp when the website was last visited on the domain
+// is_bookmarked = boolean to indicate if the website is bookmarked on the domain
+// frecency_rank = float to indicate the frecency of the website
+// frecency_last_accessed = timestamp when the website was last accessed using the app
+// pub const WEBSITE_TABLE_CREATE_STATEMENT : &str = r#"
+//   CREATE TABLE IF NOT EXISTS "website"
+//   (
+//     "id" integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+//     "domain" text NOT NULL,
+//     "url" text NOT NULL,
+//     "title" text,
+//     "last_visit_time" BIGINT,
+//     "is_bookmarked" BOOLEAN NOT NULL DEFAULT 0,
+//     "frecency_rank" REAL NOT NULL DEFAULT 0,
+//     "frecency_last_accessed" BIGINT,
+//     "comment" text
+//   );
+// "#;

@@ -1,0 +1,31 @@
+#![allow(clippy::unreadable_literal)]
+
+use iced::color;
+
+use crate::ui::styles::types::palette::Palette;
+use crate::ui::styles::types::palette_extension::PaletteExtension;
+
+pub static YETI_DARK_PALETTE: std::sync::LazyLock<Palette> = std::sync::LazyLock::new(|| Palette {
+    primary: color!(0x282828),
+    secondary: color!(0xb35900),
+    outgoing: color!(0x0059b3),
+    starred: color!(0xf5c127),
+    text_headers: color!(0x000000),
+    text_body: color!(0xffffff),
+});
+
+pub static YETI_DARK_PALETTE_EXTENSION: std::sync::LazyLock<PaletteExtension> =
+    std::sync::LazyLock::new(|| YETI_DARK_PALETTE.generate_palette_extension());
+
+pub static YETI_LIGHT_PALETTE: std::sync::LazyLock<Palette> =
+    std::sync::LazyLock::new(|| Palette {
+        primary: color!(0xffffff),
+        secondary: color!(0x0059b3),
+        outgoing: color!(0xb35900),
+        starred: color!(0xd7a313),
+        text_headers: color!(0xffffff),
+        text_body: color!(0x000000),
+    });
+
+pub static YETI_LIGHT_PALETTE_EXTENSION: std::sync::LazyLock<PaletteExtension> =
+    std::sync::LazyLock::new(|| YETI_LIGHT_PALETTE.generate_palette_extension());
